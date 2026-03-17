@@ -1,0 +1,56 @@
+graph LR
+    User["👤 User<br/>Wants to block IP"]
+    
+    subgraph Option1["📋 Option 1: App-Only"]
+        App1["✅ Block in App memory"]
+        UI1["📊 Mark as blocked in UI"]
+    end
+    
+    subgraph Option2["🔒 Option 2: Firewall"]
+        Setup2["🔧 Run setup script"]
+        Sudo2["⌛ Configure sudo"]
+        App2["✅ Block in App memory"]
+        FW2["🔥 Add firewall rule"]
+        Result2["🚫 Prevents actual access"]
+    end
+    
+    subgraph Option3["⚙️ Option 3: Persistent"]
+        Setup3["🔧 Advanced setup"]
+        Docker3["🐳 Or use Docker"]
+        App3["✅ Block in App memory"]
+        FW3["🔥 Add firewall rule"]
+        Save3["💾 Save to disk"]
+        Persist3["♻️ Survives reboot"]
+    end
+    
+    Features["Features:"]
+    Test["Testing:"]
+    Deploy["Production:"]
+    
+    User --> Option1
+    User --> Option2
+    User --> Option3
+    
+    Option1 --> UI1
+    Setup2 --> Sudo2
+    Sudo2 --> App2
+    App2 --> FW2
+    FW2 --> Result2
+    
+    Setup3 --> Docker3
+    Docker3 --> App3
+    App3 --> FW3
+    FW3 --> Save3
+    Save3 --> Persist3
+    
+    Features -.-> Option1
+    Test -.-> Option2
+    Deploy -.-> Option3
+    
+    style User fill:#00d4ff,stroke:#0a0e27,color:#000
+    style Option1 fill:#2ed573,stroke:#0a0e27,color:#000
+    style Option2 fill:#ffa502,stroke:#0a0e27,color:#000
+    style Option3 fill:#ff4757,stroke:#0a0e27,color:#fff
+    style Features fill:#0a0e27,stroke:#00d4ff,color:#00d4ff
+    style Test fill:#0a0e27,stroke:#ffa502,color:#ffa502
+    style Deploy fill:#0a0e27,stroke:#ff4757,color:#ff4757

@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Threat Intelligence & Response Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <div class="navbar-container">
+            <div class="navbar-logo">
+                <i class="fas fa-shield-alt"></i>
+                <span>Threat Intelligence & Response Dashboard</span>
+            </div>
+            <ul class="nav-tabs">
+                <li><a href="#" class="nav-link active" data-tab="monitoring">Real-Time Monitoring</a></li>
+                <li><a href="#" class="nav-link" data-tab="manual-scan">Manual Scan</a></li>
+                <li><a href="#" class="nav-link" data-tab="global-map">Global Map</a></li>
+                <li>
+                    <a href="#" class="nav-link alerts-nav-link" data-tab="alerts">
+                        Alerts
+                        <span id="critical-badge" class="critical-badge" style="display: none;">0</span>
+                        <span id="alert-badge" class="alert-badge" style="display: none;">0</span>
+                    </a>
+                </li>
+                <li><a href="#" class="nav-link" data-tab="threat-logs">Threat Logs</a></li>
+            </ul>
+            <div class="navbar-status">
+                <div class="status-indicator online">
+                    <span class="pulse"></span>
+                    Live
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Container -->
+    <div class="main-container">
+        <!-- ============ REAL-TIME MONITORING TAB ============ -->
+        <section id="monitoring" class="tab-content active">
+            <div class="monitoring-header">
+                <h1>Real-Time Threat Monitoring</h1>
+                <p>Live security analytics and threat detection</p>
+            </div>
+
+            <!-- KPI Cards -->
+            <div class="kpi-cards-grid">
+                <div class="kpi-card">
+                    <div class="kpi-icon">
+                        <i class="fas fa-globe"></i>
+                    </div>
+                    <div class="kpi-content">
+                        <div class="kpi-label">Total Requests</div>
+                        <div class="kpi-value" id="totalRequests">12,547</div>
+                        <div class="kpi-trend positive">
+                            <i class="fas fa-arrow-up"></i> 2.5% increase
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kpi-card warning">
+                    <div class="kpi-icon">
+                        <i class="fas fa-exclamation-triangle"></i>
+                    </div>
+                    <div class="kpi-content">
+                        <div class="kpi-label">Malicious IPs Detected</div>
+                        <div class="kpi-value" id="maliciousCount">234</div>
+                        <div class="kpi-trend negative">
+                            <i class="fas fa-arrow-up"></i> 12% increase
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kpi-card critical">
+                    <div class="kpi-icon">
+                        <i class="fas fa-fire"></i>
+                    </div>
+                    <div class="kpi-content">
+                        <div class="kpi-label">High-Severity Alerts</div>
+                        <div class="kpi-value" id="criticalAlerts">18</div>
+                        <div class="kpi-trend negative">
+                            <i class="fas fa-arrow-up"></i> 3 new alerts
+                        </div>
+                    </div>
+                </div>
+
+                <div class="kpi-card success">
+                    <div class="kpi-icon">
+                        <i class="fas fa-heartbeat"></i>
+                    </div>
+                    <div class="kpi-content">
+                        <div class="kpi-label">API Health</div>
+                        <div class="kpi-value">98.5%</div>
+                        <div class="kpi-trend positive">
+                            <i class="fas fa-check-circle"></i> All APIs online
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="charts-row">
+                <div class="chart-container">
+                    <h3>Threat Detection Trends</h3>
+                    <canvas id="threatTrendChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Top Attack Types</h3>
+                    <canvas id="attackTypesChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Live Threat Table -->
+            <div class="table-section">
+                <div class="table-header">
+                    <h2>Live Malicious IP Activity</h2>
+                    <div class="table-controls">
+                        <input type="text" id="ipSearch" placeholder="Search IP..." class="search-input">
+                        <button class="btn-refresh" id="refreshBtn">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+                <div class="table-wrapper">
+                    <table class="threat-table">
+                        <thead>
+                            <tr>
+                                <th>IP Address</th>
+                                <th>Country</th>
+                                <th>Threat Score</th>
+                                <th>Attack Type</th>
+                                <th>API Source</th>
+                                <th>Timestamp</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="threatTableBody">
+                            <!-- Populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ MANUAL SCAN TAB ============ -->
+        <section id="manual-scan" class="tab-content">
+            <div class="scan-header">
+                <h1>Manual Threat Scan</h1>
+                <p>Query specific IPs, domains, or file hashes against threat intelligence APIs</p>
+            </div>
+
+            <div class="scan-container">
+                <div class="scan-form">
+                    <div class="form-group">
+                        <label for="scanType">Scan Type</label>
+                        <select id="scanType" class="form-control">
+                            <option value="ip">IP Address</option>
+                            <option value="domain">Domain Name</option>
+                            <option value="hash">File Hash (MD5/SHA256)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="scanInput">Enter Target</label>
+                        <input type="text" id="scanInput" class="form-control" placeholder="192.168.1.1 or example.com or a1b2c3d4...">
+                    </div>
+
+                    <div class="form-actions">
+                        <button id="scanNowBtn" class="btn-primary btn-lg">
+                            <i class="fas fa-search"></i> Scan Now
+                        </button>
+                        <button id="clearScanBtn" class="btn-secondary btn-lg">
+                            <i class="fas fa-times"></i> Clear
+                        </button>
+                    </div>
+                </div>
+
+                <div id="scanResults" class="scan-results hidden">
+                    <div class="results-header">
+                        <h2>Scan Results</h2>
+                        <span class="scan-timestamp" id="scanTimestamp"></span>
+                    </div>
+
+                    <div class="results-summary">
+                        <div class="summary-item">
+                            <label>Status</label>
+                            <div class="status-badge" id="resultStatus">Processing...</div>
+                        </div>
+                        <div class="summary-item">
+                            <label>Overall Threat Score</label>
+                            <div class="threat-score-large" id="overallThreatScore">0</div>
+                        </div>
+                        <div class="summary-item">
+                            <label>Risk Level</label>
+                            <div class="risk-level" id="riskLevel">Unknown</div>
+                        </div>
+                    </div>
+
+                    <div class="api-details">
+                        <h3>API-Wise Threat Intelligence</h3>
+                        <div id="apiDetailsContainer" class="api-grid">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <div class="reputation-analysis">
+                        <h3>Reputation Analysis</h3>
+                        <div id="reputationContainer" class="reputation-content">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ GLOBAL MAP TAB ============ -->
+        <section id="global-map" class="tab-content">
+            <div class="map-header">
+                <h1>Global Attack Origins Map</h1>
+                <p>Real-time geographic visualization of attack sources</p>
+            </div>
+
+            <div class="map-controls">
+                <button class="btn-secondary" id="toggleHeatmap">
+                    <i class="fas fa-layer-group"></i> Toggle Heatmap
+                </button>
+                <button class="btn-secondary" id="resetMapView">
+                    <i class="fas fa-compass"></i> Reset View
+                </button>
+                <div class="map-legend">
+                    <span><i class="fas fa-map-pin legend-high"></i> High Threat</span>
+                    <span><i class="fas fa-map-pin legend-medium"></i> Medium Threat</span>
+                    <span><i class="fas fa-map-pin legend-low"></i> Low Threat</span>
+                </div>
+            </div>
+
+            <div id="worldMap" class="world-map-container"></div>
+
+            <div class="map-stats">
+                <div class="stat-box">
+                    <label>Countries Affected</label>
+                    <div class="stat-value" id="countriesCount">42</div>
+                </div>
+                <div class="stat-box">
+                    <label>Total Attack Sources</label>
+                    <div class="stat-value" id="sourcesCount">128</div>
+                </div>
+                <div class="stat-box">
+                    <label>Avg Threat Score</label>
+                    <div class="stat-value" id="avgThreatScore">74</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ ALERTS TAB ============ -->
+        <section id="alerts" class="tab-content">
+            <div class="alerts-header">
+                <h1>Security Alerts</h1>
+                <p>Real-time threat notifications and incidents</p>
+            </div>
+
+            <!-- Critical Banner -->
+            <div id="criticalBanner" class="alert-banner critical hidden">
+                <div class="banner-content">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <div>
+                        <strong>CRITICAL THREAT DETECTED</strong>
+                        <p id="bannerMessage">Multiple high-severity attacks in progress</p>
+                    </div>
+                </div>
+                <button class="banner-close" onclick="this.parentElement.classList.add('hidden')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <!-- Alert Filters -->
+            <div class="alerts-controls">
+                <div class="filter-group">
+                    <label>Severity Level</label>
+                    <div class="filter-buttons">
+                        <button class="filter-btn active" data-filter="all">All</button>
+                        <button class="filter-btn" data-filter="critical">Critical</button>
+                        <button class="filter-btn" data-filter="high">High</button>
+                        <button class="filter-btn" data-filter="medium">Medium</button>
+                        <button class="filter-btn" data-filter="low">Low</button>
+                    </div>
+                </div>
+                <button class="btn-danger" onclick="clearAllAlerts()">
+                    <i class="fas fa-trash"></i> Clear All
+                </button>
+            </div>
+
+            <!-- Alerts Container -->
+            <div id="alertsContainer" class="alerts-grid">
+                <!-- Populated by JavaScript -->
+            </div>
+        </section>
+
+        <!-- ============ THREAT LOGS TAB ============ -->
+        <section id="threat-logs" class="tab-content">
+            <div class="logs-header">
+                <h1>Threat Logs</h1>
+                <p>Complete history of detected threats and responses</p>
+            </div>
+
+            <!-- Logs Controls -->
+            <div class="logs-controls">
+                <input type="text" id="logsSearch" placeholder="Search by IP, country, or API..." class="search-input">
+                <select id="logsFilter" class="form-control">
+                    <option value="">Filter by Status</option>
+                    <option value="blocked">Blocked</option>
+                    <option value="monitored">Monitored</option>
+                    <option value="whitelisted">Whitelisted</option>
+                </select>
+                <select id="logsSort" class="form-control">
+                    <option value="date-desc">Latest First</option>
+                    <option value="date-asc">Oldest First</option>
+                    <option value="score-desc">Highest Threat Score</option>
+                    <option value="score-asc">Lowest Threat Score</option>
+                </select>
+            </div>
+
+            <!-- Logs Table -->
+            <div class="logs-table-wrapper">
+                <table class="logs-table">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Country</th>
+                            <th>Threat Score</th>
+                            <th>API Source</th>
+                            <th>Date & Time</th>
+                            <th>Status</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logsTableBody">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            <div class="pagination">
+                <button class="btn-pagination" id="prevPage">
+                    <i class="fas fa-chevron-left"></i> Previous
+                </button>
+                <div class="page-info">
+                    <span id="pageNumber">Page 1</span>
+                </div>
+                <button class="btn-pagination" id="nextPage">
+                    Next <i class="fas fa-chevron-right"></i>
+                </button>
+            </div>
+        </section>
+    </div>
+
+    <!-- Detail Modal -->
+    <div id="detailModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>IP Details</h2>
+                <button class="modal-close" onclick="document.getElementById('detailModal').classList.add('hidden')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="modalBody" class="modal-body">
+                <!-- Populated by JavaScript -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="document.getElementById('detailModal').classList.add('hidden')">Close</button>
+                <button id="modalBlockBtn" class="btn-danger">Block IP</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Main Application Script -->
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+graph TD
+    UI["🖥️ Dashboard UI<br/>Click Block Button"]
+    Dialog["💬 Dialog:<br/>Block with firewall?<br/>OK / Cancel"]
+    Backend["🔧 Backend API<br/>POST /api/block-ip"]
+    
+    OK["✅ User Chooses OK"]
+    Cancel["❌ User Chooses Cancel"]
+    
+    Memory["💾 In-Memory<br/>Store IP"]
+    Firewall["🔒 System Firewall"]
+    
+    macOS["🍎 macOS<br/>sudo route add -net IP"]
+    Linux["🐧 Linux<br/>sudo iptables -I INPUT"]
+    Windows["🪟 Windows<br/>netsh advfirewall"]
+    
+    Response["✅ Response to UI<br/>firewall_status: success"]
+    Toast["📤 Toast Notification<br/>Show result"]
+    
+    UI --> Dialog
+    Dialog --> OK
+    Dialog --> Cancel
+    OK --> Backend
+    Cancel --> Backend
+    Backend --> Memory
+    OK --> Firewall
+    Firewall --> macOS
+    Firewall --> Linux
+    Firewall --> Windows
+    macOS --> Response
+    Linux --> Response
+    Windows --> Response
+    Cancel --> Response
+    Response --> Toast
+
+    style UI fill:#00d4ff,stroke:#0a0e27,color:#000
+    style Dialog fill:#ffa502,stroke:#0a0e27,color:#000
+    style Backend fill:#00d4ff,stroke:#0a0e27,color:#000
+    style Memory fill:#2ed573,stroke:#0a0e27,color:#000
+    style Firewall fill:#ff4757,stroke:#0a0e27,color:#fff
+    style Response fill:#2ed573,stroke:#0a0e27,color:#000
+    style Toast fill:#2ed573,stroke:#0a0e27,color:#000
