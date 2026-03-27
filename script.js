@@ -99,10 +99,36 @@ const fallbackAlerts = [
     { type: 'Data Exfiltration', ip: '203.0.113.100', severity: 'high', time: getRecentTime(12), description: 'Unusual data transfer volume detected' }
 ];
 
+const SHOWN_ALERTS_STORAGE_KEY = 'shownRealtimeAlertIds';
 const mockLogsData = [];
 let alertsData = [...fallbackAlerts];
 let alertsRefreshTimer = null;
-let knownAlertIds = new Set(alertsData.map(alert => String(alert.id || '')));
+let knownAlertIds = new Set();
+let shownAlertIds = loadShownAlertIds();
+let hasBootstrappedBackendAlerts = false;
+
+function loadShownAlertIds() {
+    try {
+        const stored = JSON.parse(localStorage.getItem(SHOWN_ALERTS_STORAGE_KEY) || '[]');
+        if (!Array.isArray(stored)) {
+            return new Set();
+        }
+        return new Set(stored.map(id => String(id)));
+    } catch (error) {
+        console.warn('Failed to load shown alert IDs:', error);
+        return new Set();
+    }
+}
+
+function saveShownAlertIds() {
+    try {
+        const maxStoredIds = 500;
+        const idsToStore = Array.from(shownAlertIds).slice(-maxStoredIds);
+        localStorage.setItem(SHOWN_ALERTS_STORAGE_KEY, JSON.stringify(idsToStore));
+    } catch (error) {
+        console.warn('Failed to persist shown alert IDs:', error);
+    }
+}
 
 // Initialize mock logs data
 function initializeMockLogs() {
@@ -142,6 +168,22 @@ function getRandomCountry() {
     return countries[Math.floor(Math.random() * countries.length)];
 }
 
+function getCountryBadge(country) {
+    const badges = {
+        'China': '[CN]',
+        'Russia': '[RU]',
+        'North Korea': '[KP]',
+        'Iran': '[IR]',
+        'Brazil': '[BR]',
+        'India': '[IN]',
+        'Vietnam': '[VN]',
+        'Ukraine': '[UA]',
+        'Pakistan': '[PK]',
+        'Nigeria': '[NG]'
+    };
+    return badges[country] || '[--]';
+}
+
 function getCountryFlag(country) {
     const flags = {
         'China': '🇨🇳', 'Russia': '🇷🇺', 'North Korea': '🇰🇵', 'Iran': '🇮🇷', 'Brazil': '🇧🇷',
@@ -159,6 +201,15 @@ function getThreatLevel(score) {
     if (score >= CONFIG.threatScoreThresholds.high) return 'high';
     if (score >= CONFIG.threatScoreThresholds.medium) return 'medium';
     return 'low';
+}
+
+function getAlertSeverityFromAttempts(attemptCount, fallback = 'medium') {
+    const attempts = Number(attemptCount) > 0 ? Number(attemptCount) : 1;
+
+    if (attempts <= 5) return 'low';
+    if (attempts <= 10) return 'medium';
+    if (attempts <= 15) return 'high';
+    return 'critical';
 }
 
 function formatScore(score) {
@@ -229,13 +280,13 @@ function populateThreatTable(threats = mockThreats) {
     const tbody = document.getElementById('threatTableBody');
     tbody.innerHTML = '';
 
-    threats.forEach((threat, index) => {
+    threats.forEach((threat) => {
         const row = document.createElement('tr');
         const threatLevel = getThreatLevel(threat.score);
         
         row.innerHTML = `
             <td><code>${threat.ip}</code></td>
-            <td><span class="country-cell"><span class="flag">${threat.flag}</span>${threat.country}</span></td>
+            <td><span class="country-cell"><span class="flag">${getCountryBadge(threat.country)}</span>${threat.country}</span></td>
             <td><span class="threat-score-badge ${threatLevel}">${formatScore(threat.score)}</span></td>
             <td>${threat.type}</td>
             <td><span class="api-source">${threat.api}</span></td>
@@ -245,7 +296,7 @@ function populateThreatTable(threats = mockThreats) {
                     <button class="btn-action btn-block" onclick="blockIP('${threat.ip}')">
                         <i class="fas fa-ban"></i> Block
                     </button>
-                    <button class="btn-action btn-details" onclick="showDetails('${threat.ip}', ${index})">
+                    <button class="btn-action btn-details" onclick="showDetails('${threat.ip}')">
                         <i class="fas fa-expand"></i> Details
                     </button>
                 </div>
@@ -268,7 +319,7 @@ async function blockIP(ip) {
             `Choose:\n` +
             `  OK = Block in app + ask for firewall\n` +
             `  Cancel = Block in app only\n\n` +
-            `⚠️ Firewall blocking requires admin/sudo privileges`
+            `Firewall blocking requires admin/sudo privileges`
         );
 
         const response = await fetch(API_ENDPOINTS.block, {
@@ -289,15 +340,15 @@ async function blockIP(ip) {
 
         const result = await response.json();
         
-        let message = `✅ IP ${ip} blocked in application`;
+        let message = `IP ${ip} blocked in application`;
         
         // Show firewall status if available
         if (result.firewall_status) {
             if (result.firewall_status.success) {
-                message += `\n🔒 ${result.firewall_status.message}`;
+                message += `\nFirewall: ${result.firewall_status.message}`;
                 showToast(message, 'success');
             } else {
-                message += `\n⚠️ Firewall: ${result.firewall_status.message}`;
+                message += `\nFirewall: ${result.firewall_status.message}`;
                 message += `\n(May need admin/sudo privileges)`;
                 showToast(message, 'warning');
             }
@@ -317,8 +368,12 @@ async function blockIP(ip) {
     }
 }
 
-function showDetails(ip, index) {
-    const threat = mockThreats[index];
+function showDetails(ip) {
+    const threat = mockThreats.find(entry => entry.ip === ip);
+    if (!threat) {
+        showToast('Threat details not found', 'error');
+        return;
+    }
     const modal = document.getElementById('detailModal');
     const modalBody = document.getElementById('modalBody');
     const modalTitle = modal.querySelector('.modal-header h2');
@@ -334,7 +389,7 @@ function showDetails(ip, index) {
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Country</span>
-            <span class="modal-detail-value">${threat.flag} ${threat.country}</span>
+            <span class="modal-detail-value">${getCountryBadge(threat.country)} ${threat.country}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Threat Score</span>
@@ -489,10 +544,11 @@ function setupLiveUpdates() {
         setTimeout(() => {
             refreshBtn.style.animation = 'spin 1s linear';
             // Simulate new threat data
+            const country = getRandomCountry();
             const newThreat = {
                 ip: generateRandomIP(),
-                country: getRandomCountry(),
-                flag: getCountryFlag(getRandomCountry()),
+                country,
+                flag: getCountryFlag(country),
                 score: Math.floor(Math.random() * 100),
                 type: ['Botnet', 'DDoS', 'Malware', 'Phishing'][Math.floor(Math.random() * 4)],
                 api: ['AbuseIPDB', 'VirusTotal', 'AlienVault OTX', 'GreyNoise'][Math.floor(Math.random() * 4)],
@@ -1112,7 +1168,7 @@ function initializeMap() {
 
     // Add map tiles
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '© OpenStreetMap contributors',
+        attribution: '(c) OpenStreetMap contributors',
         maxZoom: 19
     }).addTo(mapInstance);
 
@@ -1228,14 +1284,15 @@ function displayAlerts(filter = 'all') {
 }
 
 function normalizeAlert(alert) {
+    const attemptCount = Number(alert?.attemptCount || alert?.attempt_count || 1) || 1;
     return {
         id: String(alert?.id || `alert-${Date.now()}`),
         type: alert?.type || alert?.alert_type || 'Threat Alert',
         ip: alert?.ip || alert?.ip_address || 'Unknown',
-        severity: (alert?.severity || 'medium').toLowerCase(),
+        severity: getAlertSeverityFromAttempts(attemptCount, alert?.severity),
         time: alert?.time || alert?.created_at || new Date().toLocaleString(),
         description: alert?.description || alert?.logLine || 'No description available',
-        attemptCount: Number(alert?.attemptCount || alert?.attempt_count || 1) || 1,
+        attemptCount,
         targetIp: alert?.targetIp || alert?.target_ip || '',
         logLine: alert?.logLine || alert?.log_line || '',
         source: alert?.source || 'attack_detector'
@@ -1254,20 +1311,29 @@ async function loadAlertsFromBackend(filter = 'all', notifyOnError = true) {
             ? payload.alerts.map(normalizeAlert)
             : [];
         const nextAlertIds = new Set(nextAlerts.map(alert => String(alert.id)));
+        const isInitialAlertLoad = !hasBootstrappedBackendAlerts;
 
-        nextAlerts.forEach(alert => {
-            const alertId = String(alert.id);
-            if (knownAlertIds.size > 0 && !knownAlertIds.has(alertId)) {
-                showRealtimeAlertPopup(alert);
-            }
-        });
+        if (isInitialAlertLoad) {
+            nextAlertIds.forEach(alertId => shownAlertIds.add(String(alertId)));
+            saveShownAlertIds();
+            hasBootstrappedBackendAlerts = true;
+        } else {
+            nextAlerts.forEach(alert => {
+                const alertId = String(alert.id);
+                if (!shownAlertIds.has(alertId)) {
+                    showRealtimeAlertPopup(alert);
+                    shownAlertIds.add(alertId);
+                }
+            });
+            saveShownAlertIds();
+        }
 
         alertsData = nextAlerts;
         knownAlertIds = nextAlertIds;
         displayAlerts(filter);
     } catch (error) {
         console.error('Failed to load alerts:', error);
-        alertsData = [];
+        alertsData = [...fallbackAlerts];
         knownAlertIds = new Set();
         displayAlerts(filter);
         if (notifyOnError) {
@@ -1296,6 +1362,8 @@ async function clearAllAlerts() {
 
         alertsData = [];
         knownAlertIds = new Set();
+        shownAlertIds = new Set();
+        localStorage.removeItem(SHOWN_ALERTS_STORAGE_KEY);
         displayAlerts('all');
         showToast('All alerts cleared', 'success');
     } catch (error) {
@@ -1323,7 +1391,7 @@ function normalizeStoredLog(log, index = 0) {
         id: log?.id || `log-${ts}-${index}`,
         ip: log?.ip || 'Unknown',
         country: log?.country || 'Unknown',
-        flag: log?.flag || getCountryFlag(log?.country || ''),
+        flag: log?.flag || getCountryBadge(log?.country || ''),
         score: Number(log?.score) || 0,
         api: log?.api || 'N/A',
         date: new Date(ts).toLocaleString(),
@@ -1349,7 +1417,7 @@ async function loadThreatLogsFromBackend(notifyOnError = true) {
         displayLogsTable();
     } catch (error) {
         console.error('Failed to load threat logs:', error);
-        mockLogsData.length = 0;
+        initializeMockLogs();
         displayLogsTable();
         if (notifyOnError) {
             showToast(`Failed to load threat logs: ${error.message}`, 'error');
@@ -1579,6 +1647,7 @@ function expandLogDetail(logId) {
 // ========== INITIALIZATION ==========
 
 document.addEventListener('DOMContentLoaded', () => {
+    initializeMockLogs();
     initializeTabNavigation();
     initializeMonitoring();
     initializeManualScan();
