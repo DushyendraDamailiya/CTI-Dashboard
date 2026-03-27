@@ -86,28 +86,28 @@ mysql_pool = None
 API_CONFIG = {
     'abuseipdb': {
         'endpoint': 'https://api.abuseipdb.com/api/v2/check',
-        'key': get_required_env('ABUSEIPDB_KEY'),
+        'key': get_optional_env('ABUSEIPDB_KEY'),
         'header_name': 'Key',
         'method': 'GET',
         'timeout': 10
     },
     'virustotal': {
         'endpoint': 'https://www.virustotal.com/api/v3/ip_addresses',
-        'key': get_required_env('VIRUSTOTAL_KEY'),
+        'key': get_optional_env('VIRUSTOTAL_KEY'),
         'header_name': 'x-apikey',
         'method': 'GET',
         'timeout': 10
     },
     'alienvault': {
         'endpoint': 'https://otx.alienvault.com/api/v1/indicators/ip',
-        'key': get_required_env('ALIENVAULT_KEY'),
+        'key': get_optional_env('ALIENVAULT_KEY'),
         'header_name': 'X-OTX-API-KEY',
         'method': 'GET',
         'timeout': 10
     },
     'greynoise': {
         'endpoint': 'https://api.greynoise.io/v3/community',
-        'key': get_required_env('GREYNOISE_KEY'),
+        'key': get_optional_env('GREYNOISE_KEY'),
         'header_name': 'key',
         'method': 'GET',
         'timeout': 10
@@ -124,6 +124,19 @@ API_CONFIG = {
 REQUEST_LIMIT = 100  # requests per hour per IP
 rate_limit_store = {}
 blocked_ips = {}
+
+
+def api_key_response(name):
+    """Return a consistent offline response when an API key is not configured."""
+    logger.warning(f'{name} API key not configured')
+    return {
+        'name': name,
+        'success': False,
+        'error': f'{name} API key not configured',
+        'score': 0,
+        'isMalicious': False,
+        'offline': True
+    }
 
 
 def mysql_available():
@@ -304,7 +317,8 @@ def save_alert(alert_payload):
     if not mysql_available():
         return None
 
-    severity = str(alert_payload.get('severity', 'medium')).lower()
+    attempt_count = int(alert_payload.get('attempt_count', 1) or 1)
+    severity = get_alert_severity(attempt_count, alert_payload.get('severity'))
     attacker_ip = (
         alert_payload.get('attacker_ip')
         or alert_payload.get('ip')
@@ -332,7 +346,7 @@ def save_alert(alert_payload):
                 description,
                 alert_payload.get('target_ip'),
                 alert_payload.get('log_line'),
-                int(alert_payload.get('attempt_count', 1) or 1),
+                attempt_count,
                 json.dumps(alert_payload),
             )
         )
@@ -342,6 +356,24 @@ def save_alert(alert_payload):
         return alert_id
     finally:
         conn.close()
+
+
+def get_alert_severity(attempt_count, fallback='medium'):
+    """Map attack attempts to dashboard severity bands."""
+    try:
+        attempts = int(attempt_count or 1)
+    except (TypeError, ValueError):
+        attempts = 1
+
+    if attempts <= 5:
+        return 'low'
+    if attempts <= 10:
+        return 'medium'
+    if attempts <= 15:
+        return 'high'
+    if attempts > 15:
+        return 'critical'
+    return str(fallback or 'medium').lower()
 
 
 def serialize_alert_row(row):
@@ -711,6 +743,9 @@ def rate_limit(func):
 def query_abuseipdb(target):
     """Query AbuseIPDB API"""
     config = API_CONFIG['abuseipdb']
+
+    if not config['key']:
+        return api_key_response('AbuseIPDB')
     
     try:
         headers = {
@@ -759,6 +794,9 @@ def query_abuseipdb(target):
 def query_virustotal(target):
     """Query VirusTotal API"""
     config = API_CONFIG['virustotal']
+
+    if not config['key']:
+        return api_key_response('VirusTotal')
     
     try:
         headers = {
@@ -810,6 +848,9 @@ def query_virustotal(target):
 def query_alienvault(target):
     """Query AlienVault OTX API"""
     config = API_CONFIG['alienvault']
+
+    if not config['key']:
+        return api_key_response('AlienVault OTX')
     
     try:
         headers = {
@@ -882,12 +923,16 @@ def query_alienvault(target):
 
 def get_scan_tasks(target, target_type):
     """Return API tasks based on target type."""
-    tasks = {
-        'AbuseIPDB': lambda: query_abuseipdb(target),
-        'VirusTotal': lambda: query_virustotal(target),
-        'AlienVault': lambda: query_alienvault(target),
-        'GreyNoise': lambda: query_greynoise(target)
-    }
+    tasks = {}
+
+    if API_CONFIG['abuseipdb']['key']:
+        tasks['AbuseIPDB'] = lambda: query_abuseipdb(target)
+    if API_CONFIG['virustotal']['key']:
+        tasks['VirusTotal'] = lambda: query_virustotal(target)
+    if API_CONFIG['alienvault']['key']:
+        tasks['AlienVault'] = lambda: query_alienvault(target)
+    if API_CONFIG['greynoise']['key']:
+        tasks['GreyNoise'] = lambda: query_greynoise(target)
     
     # IPQualityScore only supports IPv4 addresses and requires API key
     if target_type == 'ip' and is_valid_ipv4(target) and API_CONFIG['ipqualityscore']['key']:
@@ -898,6 +943,9 @@ def get_scan_tasks(target, target_type):
 def query_greynoise(target):
     """Query GreyNoise API (Community Version)"""
     config = API_CONFIG['greynoise']
+
+    if not config['key']:
+        return api_key_response('GreyNoise')
     
     try:
         headers = {
@@ -1000,15 +1048,7 @@ def query_ipqualityscore(target):
     
     # Check if API key is configured
     if not config['key']:
-        logger.warning('IPQualityScore API key not configured (IPQUALITYSCORE_KEY not in .env)')
-        return {
-            'name': 'IPQualityScore',
-            'success': False,
-            'error': 'IPQualityScore API key not configured',
-            'score': 0,
-            'isMalicious': False,
-            'offline': True
-        }
+        return api_key_response('IPQualityScore')
     
     # IPQualityScore works for IPv4 only
     if not is_valid_ipv4(target):
