@@ -554,6 +554,21 @@ body {
     box-shadow: 0 0 10px rgba(0, 212, 255, 0.2);
 }
 
+select.form-control {
+    color: var(--text-primary);
+}
+
+select.form-control option,
+select option {
+    background: #ffffff;
+    color: #000000;
+}
+
+select.form-control option:checked {
+    background: #1f6bd6;
+    color: #ffffff;
+}
+
 .form-actions {
     display: flex;
     gap: 1rem;
@@ -980,6 +995,10 @@ body {
 
 .alerts-controls {
     margin-bottom: 2rem;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
 }
 
 .filter-group {
@@ -997,6 +1016,7 @@ body {
 
 .filter-buttons {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
 }
 
@@ -1017,6 +1037,15 @@ body {
     background: var(--primary-blue);
     border-color: var(--primary-blue);
     color: var(--dark-bg);
+}
+
+.alerts-controls .search-input {
+    min-width: 280px;
+    flex: 1 1 320px;
+}
+
+.alerts-controls .form-control {
+    max-width: 220px;
 }
 
 .alerts-grid {

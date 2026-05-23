@@ -15,11 +15,12 @@ from datetime import datetime, timedelta
 import re
 from functools import wraps
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 import warnings
 import subprocess
 import platform
 import json
+import ipaddress
 try:
     import mysql.connector
     from mysql.connector import pooling
@@ -43,7 +44,7 @@ def get_cors_origins():
     """Load allowed CORS origins from environment."""
     origins_raw = os.getenv(
         'CORS_ORIGINS',
-        'http://localhost:3000,http://localhost:5173,http://localhost:5500,http://127.0.0.1:5500,null'
+        'http://localhost:3000,http://localhost:5173,http://localhost:5500,http://127.0.0.1:5500'
     )
     return [origin.strip() for origin in origins_raw.split(',') if origin.strip()]
 
@@ -56,7 +57,10 @@ def get_required_env(name):
 
 def get_optional_env(name, default=None):
     """Load optional environment variable with default."""
-    return os.getenv(name, default)
+    value = os.getenv(name, default)
+    if isinstance(value, str) and value.strip().lower().startswith('your_'):
+        return None
+    return value
 
 CORS(app, resources={r"/api/*": {"origins": get_cors_origins()}})
 
@@ -80,6 +84,8 @@ MYSQL_CONFIG = {
     'database': get_optional_env('MYSQL_DATABASE', 'threat_dashboard'),
 }
 MYSQL_POOL_SIZE = int(get_optional_env('MYSQL_POOL_SIZE', '5'))
+ALERT_DEDUP_WINDOW_MINUTES = max(1, int(get_optional_env('ALERT_DEDUP_WINDOW_MINUTES', '10')))
+ALERT_INGEST_TOKEN = get_optional_env('ALERT_INGEST_TOKEN')
 mysql_pool = None
 
 # API Configuration
@@ -99,7 +105,7 @@ API_CONFIG = {
         'timeout': 10
     },
     'alienvault': {
-        'endpoint': 'https://otx.alienvault.com/api/v1/indicators/ip',
+        'endpoint': 'https://otx.alienvault.com/api/v1/indicators',
         'key': get_optional_env('ALIENVAULT_KEY'),
         'header_name': 'X-OTX-API-KEY',
         'method': 'GET',
@@ -137,6 +143,47 @@ def api_key_response(name):
         'isMalicious': False,
         'offline': True
     }
+
+
+def unsupported_target_response(name, target_type):
+    """Return a consistent response for services that do not support a target type."""
+    return {
+        'name': name,
+        'success': False,
+        'error': f'{name} does not support {target_type} scans in this dashboard',
+        'score': 0,
+        'isMalicious': False,
+        'unsupported': True,
+    }
+
+
+def get_json_body():
+    """Safely parse a JSON request body."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def get_bounded_limit(default=100, maximum=1000):
+    """Read a positive integer limit from query parameters."""
+    limit = request.args.get('limit', default=default, type=int)
+    if limit is None:
+        limit = default
+    return min(max(1, int(limit)), maximum)
+
+
+def get_target_type(target):
+    """Return the validated target type or None."""
+    is_valid, target_type = validate_input(str(target or ''))
+    return target_type if is_valid else None
+
+
+def is_blockable_public_ipv4(ip):
+    """Allow firewall blocking only for public, globally routable IPv4 addresses."""
+    try:
+        parsed = ipaddress.ip_address(str(ip))
+    except ValueError:
+        return False
+    return parsed.version == 4 and parsed.is_global
 
 
 def mysql_available():
@@ -209,7 +256,8 @@ def init_mysql():
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_alerts_created_at (created_at),
                 INDEX idx_alerts_severity (severity),
-                INDEX idx_alerts_ip_address (ip_address)
+                INDEX idx_alerts_ip_address (ip_address),
+                INDEX idx_alerts_dedup (source, ip_address, alert_type, updated_at)
             )
             """
         )
@@ -312,25 +360,144 @@ def save_threat_log(ip_address, scan_payload):
         conn.close()
 
 
+def parse_attempt_count(raw_value, default=1):
+    """Normalize attempt counts from detector and simulator payloads."""
+    try:
+        attempts = int(raw_value or default)
+    except (TypeError, ValueError):
+        attempts = default
+    lower_bound = 0 if int(default or 0) <= 0 else 1
+    return max(lower_bound, attempts)
+
+
+def extract_payload_attempt_count(raw_payload):
+    """Read attempt_count from the previous raw alert payload when available."""
+    if not raw_payload:
+        return 0
+
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (TypeError, json.JSONDecodeError):
+        return 0
+
+    if not isinstance(payload, dict):
+        return 0
+    return parse_attempt_count(payload.get('attempt_count'), default=0)
+
+
+def severity_rank(severity):
+    """Return an integer rank for severity comparisons."""
+    return {
+        'low': 0,
+        'medium': 1,
+        'high': 2,
+        'critical': 3,
+    }.get(str(severity or '').strip().lower(), -1)
+
+
+def highest_severity(*severities):
+    """Return the highest severity from supplied severity labels."""
+    valid = [severity for severity in severities if severity_rank(severity) >= 0]
+    if not valid:
+        return 'low'
+    return max(valid, key=severity_rank)
+
+
+def truncate_db_value(value, max_length):
+    """Trim string values before inserting into bounded VARCHAR columns."""
+    if value is None:
+        return None
+    return str(value)[:max_length]
+
+
 def save_alert(alert_payload):
-    """Persist a real-time alert to MySQL."""
+    """Persist a real-time alert, grouping repeated active alerts by source, IP, and type."""
     if not mysql_available():
         return None
 
-    attempt_count = int(alert_payload.get('attempt_count', 1) or 1)
-    severity = get_alert_severity(attempt_count, alert_payload.get('severity'))
     attacker_ip = (
         alert_payload.get('attacker_ip')
         or alert_payload.get('ip')
         or alert_payload.get('ip_address')
         or 'Unknown'
     )
-    alert_type = alert_payload.get('name') or alert_payload.get('type') or 'Threat Alert'
+    alert_type = truncate_db_value(alert_payload.get('name') or alert_payload.get('type') or 'Threat Alert', 255)
+    source = truncate_db_value(alert_payload.get('source', 'attack_detector'), 100)
     description = alert_payload.get('description') or alert_payload.get('log_line') or alert_type
+    incoming_attempt_count = parse_attempt_count(alert_payload.get('attempt_count'), default=1)
+    target_ip = alert_payload.get('target_ip')
+    if target_ip and not is_valid_ipv4(str(target_ip)):
+        target_ip = None
+    now = datetime.now()
 
     conn = get_mysql_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, attempt_count, created_at, updated_at, raw_payload
+            FROM alerts
+            WHERE source = %s AND ip_address = %s AND alert_type = %s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (source, attacker_ip, alert_type)
+        )
+        existing_alert = cursor.fetchone()
+
+        if existing_alert:
+            alert_id, current_attempts, first_seen, last_seen, previous_raw_payload = existing_alert
+            is_active_group = (
+                last_seen is not None
+                and now - last_seen <= timedelta(minutes=ALERT_DEDUP_WINDOW_MINUTES)
+            )
+            if is_active_group:
+                previous_payload_attempts = extract_payload_attempt_count(previous_raw_payload)
+                if incoming_attempt_count > previous_payload_attempts:
+                    attempt_delta = incoming_attempt_count - previous_payload_attempts
+                else:
+                    attempt_delta = incoming_attempt_count
+
+                next_attempt_count = int(current_attempts or 0) + max(1, attempt_delta)
+                severity = get_alert_severity(
+                    next_attempt_count,
+                    first_seen=first_seen,
+                    last_seen=now,
+                    alert_type=alert_payload.get('type') or alert_type,
+                )
+                cursor.execute(
+                    """
+                    UPDATE alerts
+                    SET severity = %s,
+                        description = %s,
+                        target_ip = %s,
+                        log_line = %s,
+                        attempt_count = %s,
+                        raw_payload = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (
+                        severity,
+                        description,
+                        target_ip,
+                        alert_payload.get('log_line'),
+                        next_attempt_count,
+                        json.dumps(alert_payload),
+                        alert_id,
+                    )
+                )
+                conn.commit()
+                cursor.close()
+                return alert_id
+
+        attempt_count = incoming_attempt_count
+        severity = get_alert_severity(
+            attempt_count,
+            first_seen=now,
+            last_seen=now,
+            alert_type=alert_payload.get('type') or alert_type,
+        )
         cursor.execute(
             """
             INSERT INTO alerts (
@@ -340,11 +507,11 @@ def save_alert(alert_payload):
             """,
             (
                 alert_type,
-                str(alert_payload.get('source', 'attack_detector')),
+                source,
                 attacker_ip,
                 severity,
                 description,
-                alert_payload.get('target_ip'),
+                target_ip,
                 alert_payload.get('log_line'),
                 attempt_count,
                 json.dumps(alert_payload),
@@ -358,22 +525,73 @@ def save_alert(alert_payload):
         conn.close()
 
 
-def get_alert_severity(attempt_count, fallback='medium'):
-    """Map attack attempts to dashboard severity bands."""
+def get_alert_severity(
+    attempt_count,
+    fallback='low',
+    first_seen=None,
+    last_seen=None,
+    alert_type=None,
+    hour_attempts=None,
+    day_attempts=None,
+):
+    """Map attempts and time-window velocity to dashboard severity bands."""
     try:
         attempts = int(attempt_count or 1)
     except (TypeError, ValueError):
         attempts = 1
 
-    if attempts <= 5:
-        return 'low'
-    if attempts <= 10:
-        return 'medium'
-    if attempts <= 15:
-        return 'high'
-    if attempts > 15:
-        return 'critical'
-    return str(fallback or 'medium').lower()
+    if first_seen is None and last_seen is None and hour_attempts is None and day_attempts is None:
+        if attempts <= 10:
+            return highest_severity('low', fallback)
+        if attempts <= 20:
+            return highest_severity('medium', fallback)
+        if attempts <= 30:
+            return highest_severity('high', fallback)
+        return highest_severity('critical', fallback)
+
+    duration_minutes = None
+    if first_seen and last_seen:
+        duration_seconds = max(0, (last_seen - first_seen).total_seconds())
+        duration_minutes = duration_seconds / 60
+
+    severity = 'low'
+
+    if duration_minutes is not None:
+        if attempts >= 20 and duration_minutes <= 5:
+            severity = highest_severity(severity, 'critical')
+        elif attempts >= 10 and duration_minutes <= 1:
+            severity = highest_severity(severity, 'high')
+
+        if duration_minutes <= 10:
+            if attempts >= 31:
+                severity = highest_severity(severity, 'critical')
+            elif attempts >= 21:
+                severity = highest_severity(severity, 'high')
+            elif attempts >= 11:
+                severity = highest_severity(severity, 'medium')
+
+    hourly_total = int(hour_attempts if hour_attempts is not None else attempts)
+    daily_total = int(day_attempts if day_attempts is not None else attempts)
+
+    if hourly_total >= 101:
+        severity = highest_severity(severity, 'critical')
+    elif hourly_total >= 51:
+        severity = highest_severity(severity, 'high')
+    elif hourly_total >= 21:
+        severity = highest_severity(severity, 'medium')
+
+    if daily_total >= 201:
+        severity = highest_severity(severity, 'critical')
+    elif daily_total >= 101:
+        severity = highest_severity(severity, 'high')
+    elif daily_total >= 51:
+        severity = highest_severity(severity, 'medium')
+
+    normalized_type = str(alert_type or '').strip().lower()
+    if 'beacon' in normalized_type and attempts >= 10:
+        severity = highest_severity(severity, 'critical')
+
+    return highest_severity(severity, fallback)
 
 
 def serialize_alert_row(row):
@@ -388,7 +606,9 @@ def serialize_alert_row(row):
         'targetIp': row[6],
         'logLine': row[7],
         'attemptCount': row[8],
-        'time': row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] else '',
+        'firstSeen': row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] else '',
+        'lastSeen': row[10].strftime('%Y-%m-%d %H:%M:%S') if row[10] else '',
+        'time': row[10].strftime('%Y-%m-%d %H:%M:%S') if row[10] else '',
     }
 
 
@@ -403,9 +623,9 @@ def fetch_alerts(limit=100):
         cursor.execute(
             """
             SELECT id, alert_type, source, ip_address, severity, description,
-                   target_ip, log_line, attempt_count, created_at
+                   target_ip, log_line, attempt_count, created_at, updated_at
             FROM alerts
-            ORDER BY created_at DESC
+            ORDER BY updated_at DESC
             LIMIT %s
             """,
             (max(1, int(limit)),)
@@ -415,6 +635,67 @@ def fetch_alerts(limit=100):
         return [serialize_alert_row(row) for row in rows]
     finally:
         conn.close()
+
+
+def fetch_alert_stats():
+    """Build chart-ready alert stats from stored real-time alerts."""
+    trend_labels = ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00']
+    severities = ['critical', 'high', 'medium', 'low']
+    trend = {severity: [0] * len(trend_labels) for severity in severities}
+    attack_labels = []
+    attack_values = []
+
+    if not mysql_available():
+        return {
+            'trend': {'labels': trend_labels, **trend},
+            'attackTypes': {'labels': attack_labels, 'values': attack_values},
+        }
+
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT severity, HOUR(updated_at) AS alert_hour, COUNT(*)
+            FROM alerts
+            WHERE updated_at >= %s AND updated_at < %s
+            GROUP BY severity, alert_hour
+            """,
+            (today_start, tomorrow_start)
+        )
+        for severity, alert_hour, count in cursor.fetchall():
+            severity_key = str(severity or '').lower()
+            if severity_key not in trend:
+                continue
+            bucket_index = min(5, max(0, int(alert_hour or 0) // 4))
+            trend[severity_key][bucket_index] += int(count or 0)
+
+        cursor.execute(
+            """
+            SELECT alert_type, COALESCE(SUM(attempt_count), 0) AS total_attempts
+            FROM alerts
+            WHERE updated_at >= %s AND updated_at < %s
+            GROUP BY alert_type
+            ORDER BY total_attempts DESC
+            LIMIT 6
+            """,
+            (today_start, tomorrow_start)
+        )
+        for alert_type, total_attempts in cursor.fetchall():
+            attack_labels.append(alert_type or 'Unknown')
+            attack_values.append(int(total_attempts or 0))
+
+        cursor.close()
+    finally:
+        conn.close()
+
+    return {
+        'trend': {'labels': trend_labels, **trend},
+        'attackTypes': {'labels': attack_labels, 'values': attack_values},
+    }
 
 
 def clear_alerts():
@@ -492,19 +773,23 @@ def fetch_threat_logs(limit=500):
 
 def is_valid_ipv4(ip):
     """Validate IPv4 address"""
-    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-    if not re.match(ipv4_pattern, ip):
+    try:
+        parsed = ipaddress.ip_address(str(ip))
+    except ValueError:
         return False
-    parts = ip.split('.')
-    return all(0 <= int(part) <= 255 for part in parts)
+    return parsed.version == 4
 
 def is_valid_domain(domain):
     """Validate domain name"""
+    if not isinstance(domain, str) or len(domain) > 253:
+        return False
     domain_pattern = r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
     return re.match(domain_pattern, domain, re.IGNORECASE) is not None
 
 def is_valid_hash(hash_value):
     """Validate MD5, SHA1, or SHA256 hash"""
+    if not isinstance(hash_value, str):
+        return False
     if len(hash_value) == 32 or len(hash_value) == 40 or len(hash_value) == 64:
         return re.match(r'^[a-f0-9]+$', hash_value, re.IGNORECASE) is not None
     return False
@@ -681,7 +966,11 @@ def unblock_ip_windows(ip):
 
 def validate_input(target, target_type='auto'):
     """Validate input based on type"""
-    target = target.strip()
+    target = str(target or '').strip()
+    target_type = str(target_type or 'auto').strip().lower()
+
+    if target_type not in {'auto', 'ip', 'domain', 'hash'}:
+        return False, f'Unsupported target type: {target_type}'
     
     if target_type == 'auto':
         if is_valid_ipv4(target):
@@ -743,6 +1032,8 @@ def rate_limit(func):
 def query_abuseipdb(target):
     """Query AbuseIPDB API"""
     config = API_CONFIG['abuseipdb']
+    if not is_valid_ipv4(target):
+        return unsupported_target_response('AbuseIPDB', get_target_type(target) or 'target')
 
     if not config['key']:
         return api_key_response('AbuseIPDB')
@@ -794,9 +1085,12 @@ def query_abuseipdb(target):
 def query_virustotal(target):
     """Query VirusTotal API"""
     config = API_CONFIG['virustotal']
+    target_type = get_target_type(target)
 
     if not config['key']:
         return api_key_response('VirusTotal')
+    if target_type not in {'ip', 'domain', 'hash'}:
+        return unsupported_target_response('VirusTotal', target_type or 'target')
     
     try:
         headers = {
@@ -804,7 +1098,12 @@ def query_virustotal(target):
             'Accept': 'application/json'
         }
         
-        url = f"{config['endpoint']}/{target}"
+        endpoint_by_type = {
+            'ip': config['endpoint'],
+            'domain': 'https://www.virustotal.com/api/v3/domains',
+            'hash': 'https://www.virustotal.com/api/v3/files',
+        }
+        url = f"{endpoint_by_type[target_type]}/{target}"
         response = requests.get(
             url,
             headers=headers,
@@ -848,9 +1147,12 @@ def query_virustotal(target):
 def query_alienvault(target):
     """Query AlienVault OTX API"""
     config = API_CONFIG['alienvault']
+    target_type = get_target_type(target)
 
     if not config['key']:
         return api_key_response('AlienVault OTX')
+    if target_type not in {'ip', 'domain', 'hash'}:
+        return unsupported_target_response('AlienVault OTX', target_type or 'target')
     
     try:
         headers = {
@@ -858,8 +1160,12 @@ def query_alienvault(target):
             'Accept': 'application/json'
         }
         
-        # Use /general endpoint for basic IP reputation
-        url = f"{config['endpoint']}/{target}/general"
+        indicator_by_type = {
+            'ip': 'IPv4',
+            'domain': 'domain',
+            'hash': 'file',
+        }
+        url = f"{config['endpoint']}/{indicator_by_type[target_type]}/{target}/general"
         response = requests.get(
             url,
             headers=headers,
@@ -906,7 +1212,6 @@ def query_alienvault(target):
         }
     except requests.exceptions.RequestException as e:
         logger.error(f'AlienVault Error: {str(e)}')
-        # If it's just a timeout or connection error, return success with zero score
         return {
             'name': 'AlienVault OTX',
             'score': 0,
@@ -918,24 +1223,23 @@ def query_alienvault(target):
             'country': 'Unknown',
             'lastSeen': 'Never',
             'firstSeen': 'Unknown',
-            'success': True
+            'success': False,
+            'error': str(e)
         }
 
 def get_scan_tasks(target, target_type):
     """Return API tasks based on target type."""
     tasks = {}
 
-    if API_CONFIG['abuseipdb']['key']:
+    if target_type == 'ip':
         tasks['AbuseIPDB'] = lambda: query_abuseipdb(target)
-    if API_CONFIG['virustotal']['key']:
+
+    if target_type in {'ip', 'domain', 'hash'}:
         tasks['VirusTotal'] = lambda: query_virustotal(target)
-    if API_CONFIG['alienvault']['key']:
         tasks['AlienVault'] = lambda: query_alienvault(target)
-    if API_CONFIG['greynoise']['key']:
+
+    if target_type == 'ip':
         tasks['GreyNoise'] = lambda: query_greynoise(target)
-    
-    # IPQualityScore only supports IPv4 addresses and requires API key
-    if target_type == 'ip' and is_valid_ipv4(target) and API_CONFIG['ipqualityscore']['key']:
         tasks['IPQualityScore'] = lambda: query_ipqualityscore(target)
     
     return tasks
@@ -943,6 +1247,8 @@ def get_scan_tasks(target, target_type):
 def query_greynoise(target):
     """Query GreyNoise API (Community Version)"""
     config = API_CONFIG['greynoise']
+    if not is_valid_ipv4(target):
+        return unsupported_target_response('GreyNoise', get_target_type(target) or 'target')
 
     if not config['key']:
         return api_key_response('GreyNoise')
@@ -1027,7 +1333,6 @@ def query_greynoise(target):
         }
     except requests.exceptions.RequestException as e:
         logger.error(f'GreyNoise Error: {str(e)}')
-        # Return success with unknown classification on error
         return {
             'name': 'GreyNoise',
             'score': 0,
@@ -1039,7 +1344,8 @@ def query_greynoise(target):
             'firstSeen': 'Unknown',
             'intentions': 'Unknown',
             'tags': [],
-            'success': True
+            'success': False,
+            'error': str(e)
         }
 
 def query_ipqualityscore(target):
@@ -1420,6 +1726,7 @@ def index():
             'scan': 'POST /api/scan',
             'scan_service': 'POST /api/scan/<service>',
             'alerts': 'GET /api/alerts',
+            'alert_stats': 'GET /api/alert-stats',
             'receive_alert': 'POST /api/receive-alert',
             'threat_logs': 'GET /api/threat-logs',
             'block_ip': 'POST /api/block-ip',
@@ -1441,8 +1748,8 @@ def health_check():
 @rate_limit
 def validate_target():
     """Validate input target"""
-    data = request.get_json()
-    target = data.get('target', '').strip()
+    data = get_json_body()
+    target = str(data.get('target', '')).strip()
     target_type = data.get('type', 'auto')
     
     if not target:
@@ -1464,8 +1771,9 @@ def validate_target():
 @rate_limit
 def scan_target():
     """Scan target with relevant APIs in parallel"""
-    data = request.get_json()
-    target = data.get('target', '').strip()
+    data = get_json_body()
+    target = str(data.get('target', '')).strip()
+    requested_type = data.get('type', 'auto')
     
     if not target:
         return jsonify({
@@ -1474,11 +1782,17 @@ def scan_target():
         }), 400
     
     # Validate input
-    is_valid, target_type = validate_input(target)
+    is_valid, target_type = validate_input(target, requested_type)
     if not is_valid:
         return jsonify({
             'success': False,
             'error': target_type
+        }), 400
+
+    if target_type == 'ip' and not is_blockable_public_ipv4(target):
+        return jsonify({
+            'success': False,
+            'error': f'Only public, globally routable IPv4 addresses can be scanned: {target}'
         }), 400
     
     logger.info(f'Scanning target: {target}')
@@ -1492,20 +1806,34 @@ def scan_target():
             executor.submit(task): name
             for name, task in scan_tasks.items()
         }
-        
-        for future in as_completed(futures, timeout=30):
-            try:
-                result = future.result(timeout=25)
-                results_list.append(result)
-            except Exception as e:
-                logger.error(f"Error querying {futures[future]}: {str(e)}")
-                results_list.append({
-                    'name': futures[future],
-                    'error': str(e),
-                    'success': False,
-                    'score': 0,
-                    'isMalicious': False
-                })
+
+        try:
+            completed_futures = as_completed(futures, timeout=30)
+            for future in completed_futures:
+                try:
+                    result = future.result(timeout=25)
+                    results_list.append(result)
+                except Exception as e:
+                    logger.error(f"Error querying {futures[future]}: {str(e)}")
+                    results_list.append({
+                        'name': futures[future],
+                        'error': str(e),
+                        'success': False,
+                        'score': 0,
+                        'isMalicious': False
+                    })
+        except TimeoutError:
+            logger.error('Timed out waiting for threat intelligence services')
+            for future, name in futures.items():
+                if not future.done():
+                    future.cancel()
+                    results_list.append({
+                        'name': name,
+                        'error': 'Service timed out',
+                        'success': False,
+                        'score': 0,
+                        'isMalicious': False
+                    })
     
     results = {
         'target': target,
@@ -1569,7 +1897,7 @@ def get_alerts():
             'message': 'Alerts cleared successfully'
         }), 200
 
-    limit = request.args.get('limit', default=100, type=int)
+    limit = get_bounded_limit(default=100, maximum=1000)
     alerts = fetch_alerts(limit=limit)
     return jsonify({
         'success': True,
@@ -1579,10 +1907,28 @@ def get_alerts():
     }), 200
 
 
+@app.route('/api/alert-stats', methods=['GET'])
+def get_alert_stats():
+    """Get real-time chart stats from stored alerts."""
+    stats = fetch_alert_stats()
+    return jsonify({
+        'success': True,
+        **stats,
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+
 @app.route('/api/receive-alert', methods=['POST'])
 def receive_alert():
     """Receive an alert payload from the attack detector and store it."""
-    data = request.get_json() or {}
+    if ALERT_INGEST_TOKEN:
+        provided_token = request.headers.get('X-Alert-Token') or ''
+        auth_header = request.headers.get('Authorization') or ''
+        bearer_token = auth_header.removeprefix('Bearer ').strip()
+        if provided_token != ALERT_INGEST_TOKEN and bearer_token != ALERT_INGEST_TOKEN:
+            return jsonify({'success': False, 'error': 'Unauthorized alert source'}), 401
+
+    data = get_json_body()
     attacker_ip = (
         data.get('attacker_ip')
         or data.get('ip')
@@ -1590,6 +1936,8 @@ def receive_alert():
     )
     if not attacker_ip:
         return jsonify({'success': False, 'error': 'attacker_ip is required'}), 400
+    if not is_valid_ipv4(str(attacker_ip)):
+        return jsonify({'success': False, 'error': 'attacker_ip must be a valid IPv4 address'}), 400
 
     try:
         alert_id = save_alert(data)
@@ -1607,7 +1955,7 @@ def receive_alert():
 @app.route('/api/threat-logs', methods=['GET'])
 def get_threat_logs():
     """Get manual IP scan logs from MySQL."""
-    limit = request.args.get('limit', default=500, type=int)
+    limit = get_bounded_limit(default=500, maximum=1000)
     logs = fetch_threat_logs(limit=limit)
     return jsonify({
         'success': True,
@@ -1620,8 +1968,8 @@ def get_threat_logs():
 @rate_limit
 def scan_with_service(service):
     """Scan target with specific API service"""
-    data = request.get_json()
-    target = data.get('target', '').strip()
+    data = get_json_body()
+    target = str(data.get('target', '')).strip()
     
     if not target:
         return jsonify({'success': False, 'error': 'Target is required'}), 400
@@ -1650,8 +1998,8 @@ def scan_with_service(service):
 @rate_limit
 def block_ip():
     """Block IPv4 address at firewall + in-memory blocklist"""
-    data = request.get_json() or {}
-    ip = data.get('ip', '').strip()
+    data = get_json_body()
+    ip = str(data.get('ip', '')).strip()
     reason = data.get('reason', 'manual_block')
     enable_firewall = data.get('firewall', False)  # Optional: enable system firewall blocking
 
@@ -1660,6 +2008,12 @@ def block_ip():
 
     if not is_valid_ipv4(ip):
         return jsonify({'success': False, 'error': f'Invalid IPv4: {ip}'}), 400
+
+    if not is_blockable_public_ipv4(ip):
+        return jsonify({
+            'success': False,
+            'error': f'Only public, globally routable IPv4 addresses can be blocked: {ip}'
+        }), 400
 
     # Store in memory blocklist
     blocked_ips[ip] = {
@@ -1694,8 +2048,8 @@ def block_ip():
 @rate_limit
 def unblock_ip():
     """Unblock IPv4 address from firewall + in-memory blocklist"""
-    data = request.get_json() or {}
-    ip = data.get('ip', '').strip()
+    data = get_json_body()
+    ip = str(data.get('ip', '')).strip()
 
     if not ip:
         return jsonify({'success': False, 'error': 'IP is required'}), 400

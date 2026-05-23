@@ -281,6 +281,15 @@
 
             <!-- Alert Filters -->
             <div class="alerts-controls">
+                <input type="text" id="alertsSearch" placeholder="Search alerts by IP, type, or description..." class="search-input">
+                <select id="alertsSort" class="form-control">
+                    <option value="last-desc">Latest First</option>
+                    <option value="last-asc">Oldest First</option>
+                    <option value="attempts-desc">Most Attempts</option>
+                    <option value="attempts-asc">Fewest Attempts</option>
+                    <option value="severity-desc">Highest Severity</option>
+                    <option value="severity-asc">Lowest Severity</option>
+                </select>
                 <div class="filter-group">
                     <label>Severity Level</label>
                     <div class="filter-buttons">
@@ -291,6 +300,12 @@
                         <button class="filter-btn" data-filter="low">Low</button>
                     </div>
                 </div>
+                <button class="btn-secondary" onclick="exportAlertsCsv()">
+                    <i class="fas fa-file-csv"></i> CSV
+                </button>
+                <button class="btn-secondary" onclick="exportAlertsPdf()">
+                    <i class="fas fa-file-pdf"></i> PDF
+                </button>
                 <button class="btn-danger" onclick="clearAllAlerts()">
                     <i class="fas fa-trash"></i> Clear All
                 </button>
@@ -324,6 +339,12 @@
                     <option value="score-desc">Highest Threat Score</option>
                     <option value="score-asc">Lowest Threat Score</option>
                 </select>
+                <button class="btn-secondary" onclick="exportLogsCsv()">
+                    <i class="fas fa-file-csv"></i> CSV
+                </button>
+                <button class="btn-secondary" onclick="exportLogsPdf()">
+                    <i class="fas fa-file-pdf"></i> PDF
+                </button>
             </div>
 
             <!-- Logs Table -->
