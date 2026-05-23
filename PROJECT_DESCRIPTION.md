@@ -64,7 +64,6 @@ The project uses a browser-based dashboard, a Flask backend API, a real-time att
 | `requirements.txt` | Python dependencies required to run the backend. |
 | `setup-firewall-blocking.sh` | Helper script for firewall blocking setup on Linux. |
 | `test-firewall-blocking.py` | Test helper for firewall blocking behavior. |
-| `Documentation/` | Additional setup, implementation, troubleshooting, and feature documentation. |
 
 ## 5. Core Project Features
 
