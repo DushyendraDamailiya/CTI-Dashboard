@@ -22,6 +22,28 @@ function isValidIPv4(ip) {
     return ip.split('.').every(num => parseInt(num) <= 255);
 }
 
+function isPublicIPv4(ip) {
+    if (!isValidIPv4(ip)) return false;
+    const parts = ip.split('.').map(Number);
+    const [a, b] = parts;
+
+    return !(
+        a === 0 ||
+        a === 10 ||
+        a === 127 ||
+        a >= 224 ||
+        (a === 100 && b >= 64 && b <= 127) ||
+        (a === 169 && b === 254) ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) ||
+        (a === 192 && b === 0 && parts[2] === 0) ||
+        (a === 192 && b === 0 && parts[2] === 2) ||
+        (a === 198 && (b === 18 || b === 19)) ||
+        (a === 198 && b === 51 && parts[2] === 100) ||
+        (a === 203 && b === 0 && parts[2] === 113)
+    );
+}
+
 function isValidDomain(domain) {
     const domainRegex = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
     return domainRegex.test(domain);
@@ -81,23 +103,23 @@ const CONFIG = {
 // ========== MOCK DATA ==========
 
 const mockThreats = [
-    { ip: '192.168.1.105', country: 'China', flag: '🇨🇳', score: 95, type: 'Botnet', api: 'AbuseIPDB', timestamp: getRecentTime(2) },
-    { ip: '10.0.0.45', country: 'Russia', flag: '🇷🇺', score: 87, type: 'DDoS Attack', api: 'GreyNoise', timestamp: getRecentTime(5) },
-    { ip: '172.16.0.1', country: 'North Korea', flag: '🇰🇵', score: 92, type: 'Trojan', api: 'VirusTotal', timestamp: getRecentTime(8) },
-    { ip: '203.0.113.42', country: 'Iran', flag: '🇮🇷', score: 78, type: 'Malware', api: 'AlienVault OTX', timestamp: getRecentTime(12) },
-    { ip: '198.51.100.89', country: 'Brazil', flag: '🇧🇷', score: 65, type: 'Phishing', api: 'AbuseIPDB', timestamp: getRecentTime(15) },
-    { ip: '192.0.2.55', country: 'India', flag: '🇮🇳', score: 73, type: 'Ransomware', api: 'GreyNoise', timestamp: getRecentTime(18) },
-    { ip: '203.0.113.100', country: 'Vietnam', flag: '🇻🇳', score: 81, type: 'Brute Force', api: 'VirusTotal', timestamp: getRecentTime(22) },
-    { ip: '198.51.100.200', country: 'Ukraine', flag: '🇺🇦', score: 72, type: 'SQL Injection', api: 'AbuseIPDB', timestamp: getRecentTime(25) }
+    { ip: '8.8.8.8', country: 'United States', flag: '[US]', score: 95, type: 'Botnet', api: 'AbuseIPDB', timestamp: getRecentTime(2) },
+    { ip: '1.1.1.1', country: 'Australia', flag: '[AU]', score: 87, type: 'DDoS Attack', api: 'GreyNoise', timestamp: getRecentTime(5) },
+    { ip: '45.33.32.156', country: 'United States', flag: '[US]', score: 92, type: 'Trojan', api: 'VirusTotal', timestamp: getRecentTime(8) },
+    { ip: '91.198.174.192', country: 'Netherlands', flag: '[NL]', score: 78, type: 'Malware', api: 'AlienVault OTX', timestamp: getRecentTime(12) },
+    { ip: '151.101.1.69', country: 'United States', flag: '[US]', score: 65, type: 'Phishing', api: 'AbuseIPDB', timestamp: getRecentTime(15) },
+    { ip: '9.9.9.9', country: 'United States', flag: '[US]', score: 73, type: 'Ransomware', api: 'GreyNoise', timestamp: getRecentTime(18) },
+    { ip: '208.67.222.222', country: 'United States', flag: '[US]', score: 81, type: 'Brute Force', api: 'VirusTotal', timestamp: getRecentTime(22) },
+    { ip: '185.199.108.153', country: 'United States', flag: '[US]', score: 72, type: 'SQL Injection', api: 'AbuseIPDB', timestamp: getRecentTime(25) }
 ];
 
 const fallbackAlerts = [
-    { type: 'Critical DDoS Detected', ip: '192.168.1.105', severity: 'critical', time: getRecentTime(2), description: 'Massive DDoS attack from coordinated botnets' },
-    { type: 'Malware Distribution', ip: '10.0.0.45', severity: 'high', time: getRecentTime(8), description: 'Known malware hosting detected' },
-    { type: 'Brute Force Attack', ip: '203.0.113.42', severity: 'medium', time: getRecentTime(15), description: 'Multiple failed login attempts detected' },
-    { type: 'Ransomware Activity', ip: '172.16.0.1', severity: 'critical', time: getRecentTime(5), description: 'Ransomware encryption behavior detected' },
-    { type: 'Suspicious API Access', ip: '198.51.100.89', severity: 'medium', time: getRecentTime(20), description: 'Unusual API access pattern from this IP' },
-    { type: 'Data Exfiltration', ip: '203.0.113.100', severity: 'high', time: getRecentTime(12), description: 'Unusual data transfer volume detected' }
+    { type: 'Critical DDoS Detected', ip: '8.8.8.8', severity: 'critical', time: getRecentTime(2), description: 'Massive DDoS attack from coordinated botnets' },
+    { type: 'Malware Distribution', ip: '1.1.1.1', severity: 'high', time: getRecentTime(8), description: 'Known malware hosting detected' },
+    { type: 'Brute Force Attack', ip: '45.33.32.156', severity: 'medium', time: getRecentTime(15), description: 'Multiple failed login attempts detected' },
+    { type: 'Ransomware Activity', ip: '91.198.174.192', severity: 'critical', time: getRecentTime(5), description: 'Ransomware encryption behavior detected' },
+    { type: 'Suspicious API Access', ip: '151.101.1.69', severity: 'medium', time: getRecentTime(20), description: 'Unusual API access pattern from this IP' },
+    { type: 'Data Exfiltration', ip: '185.199.108.153', severity: 'high', time: getRecentTime(12), description: 'Unusual data transfer volume detected' }
 ];
 
 const SHOWN_ALERTS_STORAGE_KEY = 'shownRealtimeAlertIds';
@@ -290,17 +312,16 @@ function getCountryBadge(country) {
         'Vietnam': '[VN]',
         'Ukraine': '[UA]',
         'Pakistan': '[PK]',
-        'Nigeria': '[NG]'
+        'Nigeria': '[NG]',
+        'United States': '[US]',
+        'Australia': '[AU]',
+        'Netherlands': '[NL]'
     };
     return badges[country] || '[--]';
 }
 
 function getCountryFlag(country) {
-    const flags = {
-        'China': '🇨🇳', 'Russia': '🇷🇺', 'North Korea': '🇰🇵', 'Iran': '🇮🇷', 'Brazil': '🇧🇷',
-        'India': '🇮🇳', 'Vietnam': '🇻🇳', 'Ukraine': '🇺🇦', 'Pakistan': '🇵🇰', 'Nigeria': '🇳🇬'
-    };
-    return flags[country] || '🌍';
+    return getCountryBadge(country);
 }
 
 function generateRandomIP() {
@@ -429,13 +450,17 @@ async function blockIP(ip) {
         showToast(`Cannot block non-IPv4 target: ${ip}`, 'error');
         return;
     }
+    if (!isPublicIPv4(ip)) {
+        showToast(`Refusing to block non-public or reserved IP: ${ip}`, 'error');
+        return;
+    }
 
     try {
         // Ask user if they want system-level firewall blocking
         const enableFirewall = confirm(
             `Block IP ${ip}?\n\n` +
             `Choose:\n` +
-            `  OK = Block in app + ask for firewall\n` +
+            `  OK = Block in app and system firewall\n` +
             `  Cancel = Block in app only\n\n` +
             `Firewall blocking requires admin/sudo privileges`
         );
@@ -476,10 +501,6 @@ async function blockIP(ip) {
         
         console.log(`Blocking IP: ${ip}`, result);
         
-        // Refresh threat table to show updated status
-        if (typeof loadRealtimeThreatData === 'function') {
-            setTimeout(loadRealtimeThreatData, 500);
-        }
     } catch (error) {
         console.error('Block IP error:', error);
         showToast(`Block failed: ${error.message}`, 'error');
@@ -894,7 +915,7 @@ function updateScanPlaceholder() {
     const scanInput = document.getElementById('scanInput');
     
     const placeholders = {
-        ip: '192.168.1.1',
+        ip: '8.8.8.8',
         domain: 'example.com',
         hash: 'a1b2c3d4e5f6...'
     };
@@ -904,6 +925,7 @@ function updateScanPlaceholder() {
 
 async function performScan() {
     const scanInput = document.getElementById('scanInput').value.trim();
+    const scanType = document.getElementById('scanType').value;
     const scanNowBtn = document.getElementById('scanNowBtn');
 
     if (!scanInput) {
@@ -912,9 +934,13 @@ async function performScan() {
     }
 
     // Validate input
-    const validation = validateInput(scanInput);
+    const validation = validateInput(scanInput, scanType);
     if (!validation.valid) {
         showToast(validation.error, 'error');
+        return;
+    }
+    if (validation.type === 'ip' && !isPublicIPv4(scanInput)) {
+        showToast(`Threat intelligence scans require a public IPv4 address: ${scanInput}`, 'error');
         return;
     }
 
@@ -934,7 +960,7 @@ async function performScan() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ target: scanInput })
+            body: JSON.stringify({ target: scanInput, type: scanType })
         });
 
         if (!response.ok) {
@@ -967,9 +993,8 @@ async function performScan() {
 }
 
 function displayScanResults(results) {
-    if (!results.results || results.results.length === 0) {
-        showToast('No results received', 'error');
-        return;
+    if (!Array.isArray(results.results)) {
+        results.results = [];
     }
 
     // Get overall assessment
@@ -1016,7 +1041,7 @@ function displayAPIDetails(apiResults) {
     
     container.innerHTML = '';
 
-    if (!apiResults || !Array.isArray(apiResults)) {
+    if (!apiResults || !Array.isArray(apiResults) || apiResults.length === 0) {
         container.innerHTML = '<p style="color: #ff4757;">No API results available</p>';
         return;
     }
@@ -1028,7 +1053,7 @@ function displayAPIDetails(apiResults) {
         
         if (result.success) {
             const statusClass = result.isMalicious ? 'malicious' : result.isSuspicious ? 'suspicious' : '';
-            const statusText = result.isMalicious ? '🔴 MALICIOUS' : result.isSuspicious ? '🟡 SUSPICIOUS' : '🟢 CLEAN';
+            const statusText = result.isMalicious ? 'MALICIOUS' : result.isSuspicious ? 'SUSPICIOUS' : 'CLEAN';
             
             // Build details list based on API type
             let detailsHTML = '';
@@ -1106,7 +1131,7 @@ function displayAPIDetails(apiResults) {
             card.innerHTML = `
                 <div class="api-card-header">
                     <span class="api-name">${escapeHtml(result.name || 'API')}</span>
-                    <span class="api-status error">❌ ERROR</span>
+                    <span class="api-status error">ERROR</span>
                 </div>
                 <p style="color: #ff4757; font-size: 0.9rem; margin: 1rem;">
                     ${escapeHtml(result.error || 'API call failed')}
@@ -1127,9 +1152,9 @@ function displayReputationAnalysis(scanResults) {
     const totalAPIs = overall.totalAPIs || 0;
     const averageScore = overall.averageScore || 0;
     
-    const overallReputation = consensus === 'MALICIOUS' ? '🔴 Highly Suspicious' :
-                              consensus === 'SUSPICIOUS' ? '🟡 Potentially Malicious' :
-                              '🟢 Good Standing';
+    const overallReputation = consensus === 'MALICIOUS' ? 'Highly Suspicious' :
+                              consensus === 'SUSPICIOUS' ? 'Potentially Malicious' :
+                              'Good Standing';
     
     const abuseHistory = maliciousAPIs > 0 ? `${maliciousAPIs}/${totalAPIs} APIs detected malicious activity` :
                          'No abuse history detected';

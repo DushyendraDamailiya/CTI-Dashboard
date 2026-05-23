@@ -9,12 +9,14 @@ import re
 import time
 import socket
 import threading
+import ipaddress
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 import requests
 
 BACKEND_URL = os.getenv("ATTACK_BACKEND_URL", "http://localhost:5001")
+ALERT_INGEST_TOKEN = os.getenv("ALERT_INGEST_TOKEN")
 SCAN_INTERVAL = int(os.getenv("ATTACK_SCAN_INTERVAL", "2"))
 IPV4_PATTERN = r"(?:\d{1,3}\.){3}\d{1,3}"
 BEACON_WINDOW = timedelta(minutes=1)
@@ -90,6 +92,14 @@ class AttackDetector:
         except OSError:
             return "127.0.0.1"
 
+    def is_valid_public_ipv4(self, value):
+        """Validate external IPv4 addresses before alerting."""
+        try:
+            parsed = ipaddress.ip_address(str(value))
+        except ValueError:
+            return False
+        return parsed.version == 4 and parsed.is_global
+
     def extract_attacker_ip(self, line, match):
         """Extract the source IPv4 address from common log formats."""
         groupdict = match.groupdict()
@@ -119,7 +129,11 @@ class AttackDetector:
                 continue
 
             attacker_ip = self.extract_attacker_ip(line, match)
-            if not attacker_ip or attacker_ip in {local_ip, "127.0.0.1"}:
+            if (
+                not attacker_ip
+                or attacker_ip in {local_ip, "127.0.0.1"}
+                or not self.is_valid_public_ipv4(attacker_ip)
+            ):
                 continue
 
             return {
@@ -197,9 +211,13 @@ class AttackDetector:
     def send_alert(self, attack_data):
         """Send alert payload to the backend."""
         try:
+            headers = {}
+            if ALERT_INGEST_TOKEN:
+                headers["X-Alert-Token"] = ALERT_INGEST_TOKEN
             response = requests.post(
                 f"{BACKEND_URL}/api/receive-alert",
                 json=attack_data,
+                headers=headers,
                 timeout=5,
             )
             if response.status_code == 200:

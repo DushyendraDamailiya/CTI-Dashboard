@@ -15,11 +15,12 @@ from datetime import datetime, timedelta
 import re
 from functools import wraps
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 import warnings
 import subprocess
 import platform
 import json
+import ipaddress
 try:
     import mysql.connector
     from mysql.connector import pooling
@@ -43,7 +44,7 @@ def get_cors_origins():
     """Load allowed CORS origins from environment."""
     origins_raw = os.getenv(
         'CORS_ORIGINS',
-        'http://localhost:3000,http://localhost:5173,http://localhost:5500,http://127.0.0.1:5500,null'
+        'http://localhost:3000,http://localhost:5173,http://localhost:5500,http://127.0.0.1:5500'
     )
     return [origin.strip() for origin in origins_raw.split(',') if origin.strip()]
 
@@ -84,6 +85,7 @@ MYSQL_CONFIG = {
 }
 MYSQL_POOL_SIZE = int(get_optional_env('MYSQL_POOL_SIZE', '5'))
 ALERT_DEDUP_WINDOW_MINUTES = max(1, int(get_optional_env('ALERT_DEDUP_WINDOW_MINUTES', '10')))
+ALERT_INGEST_TOKEN = get_optional_env('ALERT_INGEST_TOKEN')
 mysql_pool = None
 
 # API Configuration
@@ -103,7 +105,7 @@ API_CONFIG = {
         'timeout': 10
     },
     'alienvault': {
-        'endpoint': 'https://otx.alienvault.com/api/v1/indicators/ip',
+        'endpoint': 'https://otx.alienvault.com/api/v1/indicators',
         'key': get_optional_env('ALIENVAULT_KEY'),
         'header_name': 'X-OTX-API-KEY',
         'method': 'GET',
@@ -141,6 +143,47 @@ def api_key_response(name):
         'isMalicious': False,
         'offline': True
     }
+
+
+def unsupported_target_response(name, target_type):
+    """Return a consistent response for services that do not support a target type."""
+    return {
+        'name': name,
+        'success': False,
+        'error': f'{name} does not support {target_type} scans in this dashboard',
+        'score': 0,
+        'isMalicious': False,
+        'unsupported': True,
+    }
+
+
+def get_json_body():
+    """Safely parse a JSON request body."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def get_bounded_limit(default=100, maximum=1000):
+    """Read a positive integer limit from query parameters."""
+    limit = request.args.get('limit', default=default, type=int)
+    if limit is None:
+        limit = default
+    return min(max(1, int(limit)), maximum)
+
+
+def get_target_type(target):
+    """Return the validated target type or None."""
+    is_valid, target_type = validate_input(str(target or ''))
+    return target_type if is_valid else None
+
+
+def is_blockable_public_ipv4(ip):
+    """Allow firewall blocking only for public, globally routable IPv4 addresses."""
+    try:
+        parsed = ipaddress.ip_address(str(ip))
+    except ValueError:
+        return False
+    return parsed.version == 4 and parsed.is_global
 
 
 def mysql_available():
@@ -730,19 +773,23 @@ def fetch_threat_logs(limit=500):
 
 def is_valid_ipv4(ip):
     """Validate IPv4 address"""
-    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-    if not re.match(ipv4_pattern, ip):
+    try:
+        parsed = ipaddress.ip_address(str(ip))
+    except ValueError:
         return False
-    parts = ip.split('.')
-    return all(0 <= int(part) <= 255 for part in parts)
+    return parsed.version == 4
 
 def is_valid_domain(domain):
     """Validate domain name"""
+    if not isinstance(domain, str) or len(domain) > 253:
+        return False
     domain_pattern = r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
     return re.match(domain_pattern, domain, re.IGNORECASE) is not None
 
 def is_valid_hash(hash_value):
     """Validate MD5, SHA1, or SHA256 hash"""
+    if not isinstance(hash_value, str):
+        return False
     if len(hash_value) == 32 or len(hash_value) == 40 or len(hash_value) == 64:
         return re.match(r'^[a-f0-9]+$', hash_value, re.IGNORECASE) is not None
     return False
@@ -919,7 +966,11 @@ def unblock_ip_windows(ip):
 
 def validate_input(target, target_type='auto'):
     """Validate input based on type"""
-    target = target.strip()
+    target = str(target or '').strip()
+    target_type = str(target_type or 'auto').strip().lower()
+
+    if target_type not in {'auto', 'ip', 'domain', 'hash'}:
+        return False, f'Unsupported target type: {target_type}'
     
     if target_type == 'auto':
         if is_valid_ipv4(target):
@@ -981,6 +1032,8 @@ def rate_limit(func):
 def query_abuseipdb(target):
     """Query AbuseIPDB API"""
     config = API_CONFIG['abuseipdb']
+    if not is_valid_ipv4(target):
+        return unsupported_target_response('AbuseIPDB', get_target_type(target) or 'target')
 
     if not config['key']:
         return api_key_response('AbuseIPDB')
@@ -1032,9 +1085,12 @@ def query_abuseipdb(target):
 def query_virustotal(target):
     """Query VirusTotal API"""
     config = API_CONFIG['virustotal']
+    target_type = get_target_type(target)
 
     if not config['key']:
         return api_key_response('VirusTotal')
+    if target_type not in {'ip', 'domain', 'hash'}:
+        return unsupported_target_response('VirusTotal', target_type or 'target')
     
     try:
         headers = {
@@ -1042,7 +1098,12 @@ def query_virustotal(target):
             'Accept': 'application/json'
         }
         
-        url = f"{config['endpoint']}/{target}"
+        endpoint_by_type = {
+            'ip': config['endpoint'],
+            'domain': 'https://www.virustotal.com/api/v3/domains',
+            'hash': 'https://www.virustotal.com/api/v3/files',
+        }
+        url = f"{endpoint_by_type[target_type]}/{target}"
         response = requests.get(
             url,
             headers=headers,
@@ -1086,9 +1147,12 @@ def query_virustotal(target):
 def query_alienvault(target):
     """Query AlienVault OTX API"""
     config = API_CONFIG['alienvault']
+    target_type = get_target_type(target)
 
     if not config['key']:
         return api_key_response('AlienVault OTX')
+    if target_type not in {'ip', 'domain', 'hash'}:
+        return unsupported_target_response('AlienVault OTX', target_type or 'target')
     
     try:
         headers = {
@@ -1096,8 +1160,12 @@ def query_alienvault(target):
             'Accept': 'application/json'
         }
         
-        # Use /general endpoint for basic IP reputation
-        url = f"{config['endpoint']}/{target}/general"
+        indicator_by_type = {
+            'ip': 'IPv4',
+            'domain': 'domain',
+            'hash': 'file',
+        }
+        url = f"{config['endpoint']}/{indicator_by_type[target_type]}/{target}/general"
         response = requests.get(
             url,
             headers=headers,
@@ -1144,7 +1212,6 @@ def query_alienvault(target):
         }
     except requests.exceptions.RequestException as e:
         logger.error(f'AlienVault Error: {str(e)}')
-        # If it's just a timeout or connection error, return success with zero score
         return {
             'name': 'AlienVault OTX',
             'score': 0,
@@ -1156,24 +1223,23 @@ def query_alienvault(target):
             'country': 'Unknown',
             'lastSeen': 'Never',
             'firstSeen': 'Unknown',
-            'success': True
+            'success': False,
+            'error': str(e)
         }
 
 def get_scan_tasks(target, target_type):
     """Return API tasks based on target type."""
     tasks = {}
 
-    if API_CONFIG['abuseipdb']['key']:
+    if target_type == 'ip':
         tasks['AbuseIPDB'] = lambda: query_abuseipdb(target)
-    if API_CONFIG['virustotal']['key']:
+
+    if target_type in {'ip', 'domain', 'hash'}:
         tasks['VirusTotal'] = lambda: query_virustotal(target)
-    if API_CONFIG['alienvault']['key']:
         tasks['AlienVault'] = lambda: query_alienvault(target)
-    if API_CONFIG['greynoise']['key']:
+
+    if target_type == 'ip':
         tasks['GreyNoise'] = lambda: query_greynoise(target)
-    
-    # IPQualityScore only supports IPv4 addresses and requires API key
-    if target_type == 'ip' and is_valid_ipv4(target) and API_CONFIG['ipqualityscore']['key']:
         tasks['IPQualityScore'] = lambda: query_ipqualityscore(target)
     
     return tasks
@@ -1181,6 +1247,8 @@ def get_scan_tasks(target, target_type):
 def query_greynoise(target):
     """Query GreyNoise API (Community Version)"""
     config = API_CONFIG['greynoise']
+    if not is_valid_ipv4(target):
+        return unsupported_target_response('GreyNoise', get_target_type(target) or 'target')
 
     if not config['key']:
         return api_key_response('GreyNoise')
@@ -1265,7 +1333,6 @@ def query_greynoise(target):
         }
     except requests.exceptions.RequestException as e:
         logger.error(f'GreyNoise Error: {str(e)}')
-        # Return success with unknown classification on error
         return {
             'name': 'GreyNoise',
             'score': 0,
@@ -1277,7 +1344,8 @@ def query_greynoise(target):
             'firstSeen': 'Unknown',
             'intentions': 'Unknown',
             'tags': [],
-            'success': True
+            'success': False,
+            'error': str(e)
         }
 
 def query_ipqualityscore(target):
@@ -1680,8 +1748,8 @@ def health_check():
 @rate_limit
 def validate_target():
     """Validate input target"""
-    data = request.get_json()
-    target = data.get('target', '').strip()
+    data = get_json_body()
+    target = str(data.get('target', '')).strip()
     target_type = data.get('type', 'auto')
     
     if not target:
@@ -1703,8 +1771,9 @@ def validate_target():
 @rate_limit
 def scan_target():
     """Scan target with relevant APIs in parallel"""
-    data = request.get_json()
-    target = data.get('target', '').strip()
+    data = get_json_body()
+    target = str(data.get('target', '')).strip()
+    requested_type = data.get('type', 'auto')
     
     if not target:
         return jsonify({
@@ -1713,11 +1782,17 @@ def scan_target():
         }), 400
     
     # Validate input
-    is_valid, target_type = validate_input(target)
+    is_valid, target_type = validate_input(target, requested_type)
     if not is_valid:
         return jsonify({
             'success': False,
             'error': target_type
+        }), 400
+
+    if target_type == 'ip' and not is_blockable_public_ipv4(target):
+        return jsonify({
+            'success': False,
+            'error': f'Only public, globally routable IPv4 addresses can be scanned: {target}'
         }), 400
     
     logger.info(f'Scanning target: {target}')
@@ -1731,20 +1806,34 @@ def scan_target():
             executor.submit(task): name
             for name, task in scan_tasks.items()
         }
-        
-        for future in as_completed(futures, timeout=30):
-            try:
-                result = future.result(timeout=25)
-                results_list.append(result)
-            except Exception as e:
-                logger.error(f"Error querying {futures[future]}: {str(e)}")
-                results_list.append({
-                    'name': futures[future],
-                    'error': str(e),
-                    'success': False,
-                    'score': 0,
-                    'isMalicious': False
-                })
+
+        try:
+            completed_futures = as_completed(futures, timeout=30)
+            for future in completed_futures:
+                try:
+                    result = future.result(timeout=25)
+                    results_list.append(result)
+                except Exception as e:
+                    logger.error(f"Error querying {futures[future]}: {str(e)}")
+                    results_list.append({
+                        'name': futures[future],
+                        'error': str(e),
+                        'success': False,
+                        'score': 0,
+                        'isMalicious': False
+                    })
+        except TimeoutError:
+            logger.error('Timed out waiting for threat intelligence services')
+            for future, name in futures.items():
+                if not future.done():
+                    future.cancel()
+                    results_list.append({
+                        'name': name,
+                        'error': 'Service timed out',
+                        'success': False,
+                        'score': 0,
+                        'isMalicious': False
+                    })
     
     results = {
         'target': target,
@@ -1808,7 +1897,7 @@ def get_alerts():
             'message': 'Alerts cleared successfully'
         }), 200
 
-    limit = request.args.get('limit', default=100, type=int)
+    limit = get_bounded_limit(default=100, maximum=1000)
     alerts = fetch_alerts(limit=limit)
     return jsonify({
         'success': True,
@@ -1832,7 +1921,14 @@ def get_alert_stats():
 @app.route('/api/receive-alert', methods=['POST'])
 def receive_alert():
     """Receive an alert payload from the attack detector and store it."""
-    data = request.get_json() or {}
+    if ALERT_INGEST_TOKEN:
+        provided_token = request.headers.get('X-Alert-Token') or ''
+        auth_header = request.headers.get('Authorization') or ''
+        bearer_token = auth_header.removeprefix('Bearer ').strip()
+        if provided_token != ALERT_INGEST_TOKEN and bearer_token != ALERT_INGEST_TOKEN:
+            return jsonify({'success': False, 'error': 'Unauthorized alert source'}), 401
+
+    data = get_json_body()
     attacker_ip = (
         data.get('attacker_ip')
         or data.get('ip')
@@ -1859,7 +1955,7 @@ def receive_alert():
 @app.route('/api/threat-logs', methods=['GET'])
 def get_threat_logs():
     """Get manual IP scan logs from MySQL."""
-    limit = request.args.get('limit', default=500, type=int)
+    limit = get_bounded_limit(default=500, maximum=1000)
     logs = fetch_threat_logs(limit=limit)
     return jsonify({
         'success': True,
@@ -1872,8 +1968,8 @@ def get_threat_logs():
 @rate_limit
 def scan_with_service(service):
     """Scan target with specific API service"""
-    data = request.get_json()
-    target = data.get('target', '').strip()
+    data = get_json_body()
+    target = str(data.get('target', '')).strip()
     
     if not target:
         return jsonify({'success': False, 'error': 'Target is required'}), 400
@@ -1902,8 +1998,8 @@ def scan_with_service(service):
 @rate_limit
 def block_ip():
     """Block IPv4 address at firewall + in-memory blocklist"""
-    data = request.get_json() or {}
-    ip = data.get('ip', '').strip()
+    data = get_json_body()
+    ip = str(data.get('ip', '')).strip()
     reason = data.get('reason', 'manual_block')
     enable_firewall = data.get('firewall', False)  # Optional: enable system firewall blocking
 
@@ -1912,6 +2008,12 @@ def block_ip():
 
     if not is_valid_ipv4(ip):
         return jsonify({'success': False, 'error': f'Invalid IPv4: {ip}'}), 400
+
+    if not is_blockable_public_ipv4(ip):
+        return jsonify({
+            'success': False,
+            'error': f'Only public, globally routable IPv4 addresses can be blocked: {ip}'
+        }), 400
 
     # Store in memory blocklist
     blocked_ips[ip] = {
@@ -1946,8 +2048,8 @@ def block_ip():
 @rate_limit
 def unblock_ip():
     """Unblock IPv4 address from firewall + in-memory blocklist"""
-    data = request.get_json() or {}
-    ip = data.get('ip', '').strip()
+    data = get_json_body()
+    ip = str(data.get('ip', '')).strip()
 
     if not ip:
         return jsonify({'success': False, 'error': 'IP is required'}), 400
