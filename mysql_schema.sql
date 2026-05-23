@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS `alerts` (
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX `idx_alerts_created_at` (`created_at`),
     INDEX `idx_alerts_severity` (`severity`),
-    INDEX `idx_alerts_ip_address` (`ip_address`)
+    INDEX `idx_alerts_ip_address` (`ip_address`),
+    INDEX `idx_alerts_dedup` (`source`, `ip_address`, `alert_type`, `updated_at`)
 );
 
 CREATE TABLE IF NOT EXISTS `threat_logs` (

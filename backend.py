@@ -56,7 +56,10 @@ def get_required_env(name):
 
 def get_optional_env(name, default=None):
     """Load optional environment variable with default."""
-    return os.getenv(name, default)
+    value = os.getenv(name, default)
+    if isinstance(value, str) and value.strip().lower().startswith('your_'):
+        return None
+    return value
 
 CORS(app, resources={r"/api/*": {"origins": get_cors_origins()}})
 
@@ -80,6 +83,7 @@ MYSQL_CONFIG = {
     'database': get_optional_env('MYSQL_DATABASE', 'threat_dashboard'),
 }
 MYSQL_POOL_SIZE = int(get_optional_env('MYSQL_POOL_SIZE', '5'))
+ALERT_DEDUP_WINDOW_MINUTES = max(1, int(get_optional_env('ALERT_DEDUP_WINDOW_MINUTES', '10')))
 mysql_pool = None
 
 # API Configuration
@@ -209,7 +213,8 @@ def init_mysql():
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_alerts_created_at (created_at),
                 INDEX idx_alerts_severity (severity),
-                INDEX idx_alerts_ip_address (ip_address)
+                INDEX idx_alerts_ip_address (ip_address),
+                INDEX idx_alerts_dedup (source, ip_address, alert_type, updated_at)
             )
             """
         )
@@ -312,25 +317,144 @@ def save_threat_log(ip_address, scan_payload):
         conn.close()
 
 
+def parse_attempt_count(raw_value, default=1):
+    """Normalize attempt counts from detector and simulator payloads."""
+    try:
+        attempts = int(raw_value or default)
+    except (TypeError, ValueError):
+        attempts = default
+    lower_bound = 0 if int(default or 0) <= 0 else 1
+    return max(lower_bound, attempts)
+
+
+def extract_payload_attempt_count(raw_payload):
+    """Read attempt_count from the previous raw alert payload when available."""
+    if not raw_payload:
+        return 0
+
+    try:
+        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+    except (TypeError, json.JSONDecodeError):
+        return 0
+
+    if not isinstance(payload, dict):
+        return 0
+    return parse_attempt_count(payload.get('attempt_count'), default=0)
+
+
+def severity_rank(severity):
+    """Return an integer rank for severity comparisons."""
+    return {
+        'low': 0,
+        'medium': 1,
+        'high': 2,
+        'critical': 3,
+    }.get(str(severity or '').strip().lower(), -1)
+
+
+def highest_severity(*severities):
+    """Return the highest severity from supplied severity labels."""
+    valid = [severity for severity in severities if severity_rank(severity) >= 0]
+    if not valid:
+        return 'low'
+    return max(valid, key=severity_rank)
+
+
+def truncate_db_value(value, max_length):
+    """Trim string values before inserting into bounded VARCHAR columns."""
+    if value is None:
+        return None
+    return str(value)[:max_length]
+
+
 def save_alert(alert_payload):
-    """Persist a real-time alert to MySQL."""
+    """Persist a real-time alert, grouping repeated active alerts by source, IP, and type."""
     if not mysql_available():
         return None
 
-    attempt_count = int(alert_payload.get('attempt_count', 1) or 1)
-    severity = get_alert_severity(attempt_count, alert_payload.get('severity'))
     attacker_ip = (
         alert_payload.get('attacker_ip')
         or alert_payload.get('ip')
         or alert_payload.get('ip_address')
         or 'Unknown'
     )
-    alert_type = alert_payload.get('name') or alert_payload.get('type') or 'Threat Alert'
+    alert_type = truncate_db_value(alert_payload.get('name') or alert_payload.get('type') or 'Threat Alert', 255)
+    source = truncate_db_value(alert_payload.get('source', 'attack_detector'), 100)
     description = alert_payload.get('description') or alert_payload.get('log_line') or alert_type
+    incoming_attempt_count = parse_attempt_count(alert_payload.get('attempt_count'), default=1)
+    target_ip = alert_payload.get('target_ip')
+    if target_ip and not is_valid_ipv4(str(target_ip)):
+        target_ip = None
+    now = datetime.now()
 
     conn = get_mysql_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, attempt_count, created_at, updated_at, raw_payload
+            FROM alerts
+            WHERE source = %s AND ip_address = %s AND alert_type = %s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (source, attacker_ip, alert_type)
+        )
+        existing_alert = cursor.fetchone()
+
+        if existing_alert:
+            alert_id, current_attempts, first_seen, last_seen, previous_raw_payload = existing_alert
+            is_active_group = (
+                last_seen is not None
+                and now - last_seen <= timedelta(minutes=ALERT_DEDUP_WINDOW_MINUTES)
+            )
+            if is_active_group:
+                previous_payload_attempts = extract_payload_attempt_count(previous_raw_payload)
+                if incoming_attempt_count > previous_payload_attempts:
+                    attempt_delta = incoming_attempt_count - previous_payload_attempts
+                else:
+                    attempt_delta = incoming_attempt_count
+
+                next_attempt_count = int(current_attempts or 0) + max(1, attempt_delta)
+                severity = get_alert_severity(
+                    next_attempt_count,
+                    first_seen=first_seen,
+                    last_seen=now,
+                    alert_type=alert_payload.get('type') or alert_type,
+                )
+                cursor.execute(
+                    """
+                    UPDATE alerts
+                    SET severity = %s,
+                        description = %s,
+                        target_ip = %s,
+                        log_line = %s,
+                        attempt_count = %s,
+                        raw_payload = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (
+                        severity,
+                        description,
+                        target_ip,
+                        alert_payload.get('log_line'),
+                        next_attempt_count,
+                        json.dumps(alert_payload),
+                        alert_id,
+                    )
+                )
+                conn.commit()
+                cursor.close()
+                return alert_id
+
+        attempt_count = incoming_attempt_count
+        severity = get_alert_severity(
+            attempt_count,
+            first_seen=now,
+            last_seen=now,
+            alert_type=alert_payload.get('type') or alert_type,
+        )
         cursor.execute(
             """
             INSERT INTO alerts (
@@ -340,11 +464,11 @@ def save_alert(alert_payload):
             """,
             (
                 alert_type,
-                str(alert_payload.get('source', 'attack_detector')),
+                source,
                 attacker_ip,
                 severity,
                 description,
-                alert_payload.get('target_ip'),
+                target_ip,
                 alert_payload.get('log_line'),
                 attempt_count,
                 json.dumps(alert_payload),
@@ -358,22 +482,73 @@ def save_alert(alert_payload):
         conn.close()
 
 
-def get_alert_severity(attempt_count, fallback='medium'):
-    """Map attack attempts to dashboard severity bands."""
+def get_alert_severity(
+    attempt_count,
+    fallback='low',
+    first_seen=None,
+    last_seen=None,
+    alert_type=None,
+    hour_attempts=None,
+    day_attempts=None,
+):
+    """Map attempts and time-window velocity to dashboard severity bands."""
     try:
         attempts = int(attempt_count or 1)
     except (TypeError, ValueError):
         attempts = 1
 
-    if attempts <= 5:
-        return 'low'
-    if attempts <= 10:
-        return 'medium'
-    if attempts <= 15:
-        return 'high'
-    if attempts > 15:
-        return 'critical'
-    return str(fallback or 'medium').lower()
+    if first_seen is None and last_seen is None and hour_attempts is None and day_attempts is None:
+        if attempts <= 10:
+            return highest_severity('low', fallback)
+        if attempts <= 20:
+            return highest_severity('medium', fallback)
+        if attempts <= 30:
+            return highest_severity('high', fallback)
+        return highest_severity('critical', fallback)
+
+    duration_minutes = None
+    if first_seen and last_seen:
+        duration_seconds = max(0, (last_seen - first_seen).total_seconds())
+        duration_minutes = duration_seconds / 60
+
+    severity = 'low'
+
+    if duration_minutes is not None:
+        if attempts >= 20 and duration_minutes <= 5:
+            severity = highest_severity(severity, 'critical')
+        elif attempts >= 10 and duration_minutes <= 1:
+            severity = highest_severity(severity, 'high')
+
+        if duration_minutes <= 10:
+            if attempts >= 31:
+                severity = highest_severity(severity, 'critical')
+            elif attempts >= 21:
+                severity = highest_severity(severity, 'high')
+            elif attempts >= 11:
+                severity = highest_severity(severity, 'medium')
+
+    hourly_total = int(hour_attempts if hour_attempts is not None else attempts)
+    daily_total = int(day_attempts if day_attempts is not None else attempts)
+
+    if hourly_total >= 101:
+        severity = highest_severity(severity, 'critical')
+    elif hourly_total >= 51:
+        severity = highest_severity(severity, 'high')
+    elif hourly_total >= 21:
+        severity = highest_severity(severity, 'medium')
+
+    if daily_total >= 201:
+        severity = highest_severity(severity, 'critical')
+    elif daily_total >= 101:
+        severity = highest_severity(severity, 'high')
+    elif daily_total >= 51:
+        severity = highest_severity(severity, 'medium')
+
+    normalized_type = str(alert_type or '').strip().lower()
+    if 'beacon' in normalized_type and attempts >= 10:
+        severity = highest_severity(severity, 'critical')
+
+    return highest_severity(severity, fallback)
 
 
 def serialize_alert_row(row):
@@ -388,7 +563,9 @@ def serialize_alert_row(row):
         'targetIp': row[6],
         'logLine': row[7],
         'attemptCount': row[8],
-        'time': row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] else '',
+        'firstSeen': row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] else '',
+        'lastSeen': row[10].strftime('%Y-%m-%d %H:%M:%S') if row[10] else '',
+        'time': row[10].strftime('%Y-%m-%d %H:%M:%S') if row[10] else '',
     }
 
 
@@ -403,9 +580,9 @@ def fetch_alerts(limit=100):
         cursor.execute(
             """
             SELECT id, alert_type, source, ip_address, severity, description,
-                   target_ip, log_line, attempt_count, created_at
+                   target_ip, log_line, attempt_count, created_at, updated_at
             FROM alerts
-            ORDER BY created_at DESC
+            ORDER BY updated_at DESC
             LIMIT %s
             """,
             (max(1, int(limit)),)
@@ -415,6 +592,67 @@ def fetch_alerts(limit=100):
         return [serialize_alert_row(row) for row in rows]
     finally:
         conn.close()
+
+
+def fetch_alert_stats():
+    """Build chart-ready alert stats from stored real-time alerts."""
+    trend_labels = ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00']
+    severities = ['critical', 'high', 'medium', 'low']
+    trend = {severity: [0] * len(trend_labels) for severity in severities}
+    attack_labels = []
+    attack_values = []
+
+    if not mysql_available():
+        return {
+            'trend': {'labels': trend_labels, **trend},
+            'attackTypes': {'labels': attack_labels, 'values': attack_values},
+        }
+
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT severity, HOUR(updated_at) AS alert_hour, COUNT(*)
+            FROM alerts
+            WHERE updated_at >= %s AND updated_at < %s
+            GROUP BY severity, alert_hour
+            """,
+            (today_start, tomorrow_start)
+        )
+        for severity, alert_hour, count in cursor.fetchall():
+            severity_key = str(severity or '').lower()
+            if severity_key not in trend:
+                continue
+            bucket_index = min(5, max(0, int(alert_hour or 0) // 4))
+            trend[severity_key][bucket_index] += int(count or 0)
+
+        cursor.execute(
+            """
+            SELECT alert_type, COALESCE(SUM(attempt_count), 0) AS total_attempts
+            FROM alerts
+            WHERE updated_at >= %s AND updated_at < %s
+            GROUP BY alert_type
+            ORDER BY total_attempts DESC
+            LIMIT 6
+            """,
+            (today_start, tomorrow_start)
+        )
+        for alert_type, total_attempts in cursor.fetchall():
+            attack_labels.append(alert_type or 'Unknown')
+            attack_values.append(int(total_attempts or 0))
+
+        cursor.close()
+    finally:
+        conn.close()
+
+    return {
+        'trend': {'labels': trend_labels, **trend},
+        'attackTypes': {'labels': attack_labels, 'values': attack_values},
+    }
 
 
 def clear_alerts():
@@ -1420,6 +1658,7 @@ def index():
             'scan': 'POST /api/scan',
             'scan_service': 'POST /api/scan/<service>',
             'alerts': 'GET /api/alerts',
+            'alert_stats': 'GET /api/alert-stats',
             'receive_alert': 'POST /api/receive-alert',
             'threat_logs': 'GET /api/threat-logs',
             'block_ip': 'POST /api/block-ip',
@@ -1579,6 +1818,17 @@ def get_alerts():
     }), 200
 
 
+@app.route('/api/alert-stats', methods=['GET'])
+def get_alert_stats():
+    """Get real-time chart stats from stored alerts."""
+    stats = fetch_alert_stats()
+    return jsonify({
+        'success': True,
+        **stats,
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+
 @app.route('/api/receive-alert', methods=['POST'])
 def receive_alert():
     """Receive an alert payload from the attack detector and store it."""
@@ -1590,6 +1840,8 @@ def receive_alert():
     )
     if not attacker_ip:
         return jsonify({'success': False, 'error': 'attacker_ip is required'}), 400
+    if not is_valid_ipv4(str(attacker_ip)):
+        return jsonify({'success': False, 'error': 'attacker_ip must be a valid IPv4 address'}), 400
 
     try:
         alert_id = save_alert(data)

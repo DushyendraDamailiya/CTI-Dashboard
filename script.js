@@ -10,6 +10,7 @@ const API_ENDPOINTS = {
     health: `${BACKEND_URL}/health`,
     block: `${BACKEND_URL}/api/block-ip`,
     alerts: `${BACKEND_URL}/api/alerts`,
+    alertStats: `${BACKEND_URL}/api/alert-stats`,
     threatLogs: `${BACKEND_URL}/api/threat-logs`
 };
 
@@ -106,6 +107,7 @@ let alertsRefreshTimer = null;
 let knownAlertIds = new Set();
 let shownAlertIds = loadShownAlertIds();
 let hasBootstrappedBackendAlerts = false;
+let currentAlertFilter = 'all';
 
 function loadShownAlertIds() {
     try {
@@ -128,6 +130,115 @@ function saveShownAlertIds() {
     } catch (error) {
         console.warn('Failed to persist shown alert IDs:', error);
     }
+}
+
+function getSeverityRank(severity) {
+    const severityOrder = {
+        low: 0,
+        medium: 1,
+        high: 2,
+        critical: 3
+    };
+    return severityOrder[String(severity || '').toLowerCase()] ?? -1;
+}
+
+function shouldShowGroupedAlertPopup(nextAlert, previousAlert) {
+    if (!previousAlert) {
+        return false;
+    }
+
+    const nextAttempts = Number(nextAlert.attemptCount) || 1;
+    const previousAttempts = Number(previousAlert.attemptCount) || 1;
+    const severityIncreased = getSeverityRank(nextAlert.severity) > getSeverityRank(previousAlert.severity);
+    const attemptsIncreased = nextAttempts > previousAttempts;
+
+    return severityIncreased || attemptsIncreased;
+}
+
+function escapeCsvValue(value) {
+    const text = String(value ?? '');
+    return `"${text.replace(/"/g, '""')}"`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function downloadTextFile(filename, content, type = 'text/plain;charset=utf-8') {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+}
+
+function exportRowsToCsv(filename, headers, rows) {
+    if (!rows.length) {
+        showToast('No data to export', 'info');
+        return;
+    }
+
+    const headerLine = headers.map(header => escapeCsvValue(header.label)).join(',');
+    const bodyLines = rows.map(row => headers
+        .map(header => escapeCsvValue(typeof header.value === 'function' ? header.value(row) : row[header.value]))
+        .join(',')
+    );
+    downloadTextFile(filename, [headerLine, ...bodyLines].join('\n'), 'text/csv;charset=utf-8');
+    showToast('CSV export downloaded', 'success');
+}
+
+function exportRowsToPdf(title, headers, rows) {
+    if (!rows.length) {
+        showToast('No data to export', 'info');
+        return;
+    }
+
+    const printable = window.open('', '_blank');
+    if (!printable) {
+        showToast('Allow popups to export PDF', 'error');
+        return;
+    }
+
+    const tableRows = rows.map(row => `
+        <tr>${headers.map(header => `<td>${escapeHtml(typeof header.value === 'function' ? header.value(row) : row[header.value])}</td>`).join('')}</tr>
+    `).join('');
+
+    printable.document.write(`
+        <!doctype html>
+        <html>
+        <head>
+            <title>${escapeHtml(title)}</title>
+            <style>
+                body { font-family: Arial, sans-serif; color: #111827; padding: 24px; }
+                h1 { font-size: 20px; margin-bottom: 4px; }
+                p { color: #4b5563; margin-top: 0; }
+                table { width: 100%; border-collapse: collapse; font-size: 12px; }
+                th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; vertical-align: top; }
+                th { background: #f3f4f6; }
+            </style>
+        </head>
+        <body>
+            <h1>${escapeHtml(title)}</h1>
+            <p>Exported ${new Date().toLocaleString()}</p>
+            <table>
+                <thead><tr>${headers.map(header => `<th>${escapeHtml(header.label)}</th>`).join('')}</tr></thead>
+                <tbody>${tableRows}</tbody>
+            </table>
+        </body>
+        </html>
+    `);
+    printable.document.close();
+    printable.focus();
+    printable.print();
 }
 
 // Initialize mock logs data
@@ -204,11 +315,16 @@ function getThreatLevel(score) {
 }
 
 function getAlertSeverityFromAttempts(attemptCount, fallback = 'medium') {
+    const normalizedFallback = String(fallback || '').trim().toLowerCase();
+    if (['low', 'medium', 'high', 'critical'].includes(normalizedFallback)) {
+        return normalizedFallback;
+    }
+
     const attempts = Number(attemptCount) > 0 ? Number(attemptCount) : 1;
 
-    if (attempts <= 5) return 'low';
-    if (attempts <= 10) return 'medium';
-    if (attempts <= 15) return 'high';
+    if (attempts <= 10) return 'low';
+    if (attempts <= 20) return 'medium';
+    if (attempts <= 30) return 'high';
     return 'critical';
 }
 
@@ -222,7 +338,7 @@ function showToast(message, type = 'success', duration = 3000) {
     toast.className = `toast ${type}`;
     toast.innerHTML = `
         <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
-        <span>${message}</span>
+        <span>${escapeHtml(message)}</span>
     `;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), duration);
@@ -285,23 +401,25 @@ function populateThreatTable(threats = mockThreats) {
         const threatLevel = getThreatLevel(threat.score);
         
         row.innerHTML = `
-            <td><code>${threat.ip}</code></td>
-            <td><span class="country-cell"><span class="flag">${getCountryBadge(threat.country)}</span>${threat.country}</span></td>
+            <td><code>${escapeHtml(threat.ip)}</code></td>
+            <td><span class="country-cell"><span class="flag">${escapeHtml(getCountryBadge(threat.country))}</span>${escapeHtml(threat.country)}</span></td>
             <td><span class="threat-score-badge ${threatLevel}">${formatScore(threat.score)}</span></td>
-            <td>${threat.type}</td>
-            <td><span class="api-source">${threat.api}</span></td>
-            <td>${threat.timestamp}</td>
+            <td>${escapeHtml(threat.type)}</td>
+            <td><span class="api-source">${escapeHtml(threat.api)}</span></td>
+            <td>${escapeHtml(threat.timestamp)}</td>
             <td>
                 <div class="action-buttons">
-                    <button class="btn-action btn-block" onclick="blockIP('${threat.ip}')">
+                    <button class="btn-action btn-block" type="button">
                         <i class="fas fa-ban"></i> Block
                     </button>
-                    <button class="btn-action btn-details" onclick="showDetails('${threat.ip}')">
+                    <button class="btn-action btn-details" type="button">
                         <i class="fas fa-expand"></i> Details
                     </button>
                 </div>
             </td>
         `;
+        row.querySelector('.btn-block').addEventListener('click', () => blockIP(threat.ip));
+        row.querySelector('.btn-details').addEventListener('click', () => showDetails(threat.ip));
         tbody.appendChild(row);
     });
 }
@@ -385,11 +503,11 @@ function showDetails(ip) {
     modalBody.innerHTML = `
         <div class="modal-detail-row">
             <span class="modal-detail-label">IP Address</span>
-            <span class="modal-detail-value"><code>${threat.ip}</code></span>
+            <span class="modal-detail-value"><code>${escapeHtml(threat.ip)}</code></span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Country</span>
-            <span class="modal-detail-value">${getCountryBadge(threat.country)} ${threat.country}</span>
+            <span class="modal-detail-value">${escapeHtml(getCountryBadge(threat.country))} ${escapeHtml(threat.country)}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Threat Score</span>
@@ -401,15 +519,15 @@ function showDetails(ip) {
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Attack Type</span>
-            <span class="modal-detail-value">${threat.type}</span>
+            <span class="modal-detail-value">${escapeHtml(threat.type)}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">API Source</span>
-            <span class="modal-detail-value">${threat.api}</span>
+            <span class="modal-detail-value">${escapeHtml(threat.api)}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Last Detected</span>
-            <span class="modal-detail-value">${threat.timestamp}</span>
+            <span class="modal-detail-value">${escapeHtml(threat.timestamp)}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Reputation</span>
@@ -460,7 +578,8 @@ function showAlertDetails(alertId) {
     const modalBody = document.getElementById('modalBody');
     const modalTitle = modal.querySelector('.modal-header h2');
     const blockBtn = document.getElementById('modalBlockBtn');
-    const alertDateTime = formatAlertDateTime(alert.time);
+    const firstSeenDateTime = formatAlertDateTime(alert.firstSeen || alert.time);
+    const lastSeenDateTime = formatAlertDateTime(alert.lastSeen || alert.time);
     const attackAttempts = Number(alert.attemptCount) > 0 ? Number(alert.attemptCount) : 1;
     const attackerIp = alert.ip || 'Unknown';
 
@@ -471,19 +590,23 @@ function showAlertDetails(alertId) {
     modalBody.innerHTML = `
         <div class="modal-detail-row">
             <span class="modal-detail-label">Attacker IP Address</span>
-            <span class="modal-detail-value"><code>${attackerIp}</code></span>
+            <span class="modal-detail-value"><code>${escapeHtml(attackerIp)}</code></span>
         </div>
         <div class="modal-detail-row">
-            <span class="modal-detail-label">Date</span>
-            <span class="modal-detail-value">${alertDateTime.date}</span>
+            <span class="modal-detail-label">Last Seen Date</span>
+            <span class="modal-detail-value">${escapeHtml(lastSeenDateTime.date)}</span>
         </div>
         <div class="modal-detail-row">
-            <span class="modal-detail-label">Time</span>
-            <span class="modal-detail-value">${alertDateTime.time}</span>
+            <span class="modal-detail-label">Last Seen Time</span>
+            <span class="modal-detail-value">${escapeHtml(lastSeenDateTime.time)}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">First Seen</span>
+            <span class="modal-detail-value">${escapeHtml(firstSeenDateTime.date)} ${escapeHtml(firstSeenDateTime.time)}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Type of Attack</span>
-            <span class="modal-detail-value">${alert.type || 'Unknown'}</span>
+            <span class="modal-detail-value">${escapeHtml(alert.type || 'Unknown')}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Attack Attempts</span>
@@ -491,23 +614,23 @@ function showAlertDetails(alertId) {
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Severity</span>
-            <span class="modal-detail-value" style="text-transform: uppercase; color: ${getThreatColor(alert.severity)}">${alert.severity}</span>
+            <span class="modal-detail-value" style="text-transform: uppercase; color: ${getThreatColor(alert.severity)}">${escapeHtml(alert.severity)}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Target IP</span>
-            <span class="modal-detail-value">${alert.targetIp || 'N/A'}</span>
+            <span class="modal-detail-value">${escapeHtml(alert.targetIp || 'N/A')}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Description</span>
-            <span class="modal-detail-value">${alert.description || 'No description available'}</span>
+            <span class="modal-detail-value">${escapeHtml(alert.description || 'No description available')}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Log Entry</span>
-            <span class="modal-detail-value">${alert.logLine || 'N/A'}</span>
+            <span class="modal-detail-value">${escapeHtml(alert.logLine || 'N/A')}</span>
         </div>
         <div class="modal-detail-row">
             <span class="modal-detail-label">Source</span>
-            <span class="modal-detail-value">${alert.source || 'attack_detector'}</span>
+            <span class="modal-detail-value">${escapeHtml(alert.source || 'attack_detector')}</span>
         </div>
     `;
 
@@ -584,6 +707,7 @@ let attackTypesChart = null;
 function initializeCharts() {
     initializeThreatTrendChart();
     initializeAttackTypesChart();
+    loadAlertStatsFromBackend(false);
 }
 
 function initializeThreatTrendChart() {
@@ -600,7 +724,7 @@ function initializeThreatTrendChart() {
             datasets: [
                 {
                     label: 'Critical Threats',
-                    data: [12, 19, 8, 15, 22, 18, 25],
+                    data: [0, 0, 0, 0, 0, 0, 0],
                     borderColor: '#ff4757',
                     backgroundColor: 'rgba(255, 71, 87, 0.1)',
                     tension: 0.4,
@@ -608,7 +732,7 @@ function initializeThreatTrendChart() {
                 },
                 {
                     label: 'High Severity',
-                    data: [25, 32, 28, 35, 30, 28, 32],
+                    data: [0, 0, 0, 0, 0, 0, 0],
                     borderColor: '#ffa502',
                     backgroundColor: 'rgba(255, 165, 2, 0.1)',
                     tension: 0.4,
@@ -616,9 +740,17 @@ function initializeThreatTrendChart() {
                 },
                 {
                     label: 'Medium Threats',
-                    data: [15, 18, 20, 22, 25, 24, 28],
+                    data: [0, 0, 0, 0, 0, 0, 0],
                     borderColor: '#00d4ff',
                     backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Low Threats',
+                    data: [0, 0, 0, 0, 0, 0, 0],
+                    borderColor: '#2ed573',
+                    backgroundColor: 'rgba(46, 213, 115, 0.08)',
                     tension: 0.4,
                     fill: true
                 }
@@ -660,10 +792,11 @@ function initializeAttackTypesChart() {
     attackTypesChart = new Chart(ctx, {
         type: 'doughnut',
         data: {
-            labels: ['DDoS', 'Malware', 'Botnet', 'Phishing', 'Ransomware', 'Brute Force'],
+            labels: ['No Alerts Yet'],
             datasets: [{
-                data: [28, 22, 18, 15, 12, 5],
+                data: [1],
                 backgroundColor: [
+                    '#2a2f47',
                     '#ff4757',
                     '#ffa502',
                     '#ff9f43',
@@ -690,6 +823,52 @@ function initializeAttackTypesChart() {
             }
         }
     });
+}
+
+function updateThreatTrendChart(trend = {}) {
+    if (!threatTrendChart) return;
+
+    threatTrendChart.data.labels = Array.isArray(trend.labels) && trend.labels.length
+        ? trend.labels
+        : ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'];
+    threatTrendChart.data.datasets[0].data = Array.isArray(trend.critical) ? trend.critical : [];
+    threatTrendChart.data.datasets[1].data = Array.isArray(trend.high) ? trend.high : [];
+    threatTrendChart.data.datasets[2].data = Array.isArray(trend.medium) ? trend.medium : [];
+    threatTrendChart.data.datasets[3].data = Array.isArray(trend.low) ? trend.low : [];
+    threatTrendChart.update();
+}
+
+function updateAttackTypesChart(attackTypes = {}) {
+    if (!attackTypesChart) return;
+
+    const labels = Array.isArray(attackTypes.labels) ? attackTypes.labels : [];
+    const values = Array.isArray(attackTypes.values) ? attackTypes.values : [];
+    const hasValues = values.some(value => Number(value) > 0);
+
+    attackTypesChart.data.labels = hasValues ? labels : ['No Alerts Yet'];
+    attackTypesChart.data.datasets[0].data = hasValues ? values : [1];
+    attackTypesChart.data.datasets[0].backgroundColor = hasValues
+        ? ['#ff4757', '#ffa502', '#ff9f43', '#00d4ff', '#2ed573', '#d946ef']
+        : ['#2a2f47'];
+    attackTypesChart.update();
+}
+
+async function loadAlertStatsFromBackend(notifyOnError = true) {
+    try {
+        const response = await fetch(API_ENDPOINTS.alertStats);
+        if (!response.ok) {
+            throw new Error(`HTTP Error: ${response.status}`);
+        }
+
+        const stats = await response.json();
+        updateThreatTrendChart(stats.trend || {});
+        updateAttackTypesChart(stats.attackTypes || {});
+    } catch (error) {
+        console.error('Failed to load alert stats:', error);
+        if (notifyOnError) {
+            showToast(`Failed to load chart data: ${error.message}`, 'error');
+        }
+    }
 }
 
 // ========== MANUAL SCAN TAB ==========
@@ -845,6 +1024,7 @@ function displayAPIDetails(apiResults) {
     apiResults.forEach(result => {
         const card = document.createElement('div');
         card.className = 'api-card';
+        const value = (field, fallback = 'Unknown') => escapeHtml(result[field] ?? fallback);
         
         if (result.success) {
             const statusClass = result.isMalicious ? 'malicious' : result.isSuspicious ? 'suspicious' : '';
@@ -856,37 +1036,37 @@ function displayAPIDetails(apiResults) {
             if (result.name === 'AbuseIPDB') {
                 const reportsValue = Number.isFinite(Number(result.reports)) ? Number(result.reports) : 0;
                 detailsHTML = `
-                    <li><strong>Score:</strong> ${result.score}/100</li>
+                    <li><strong>Score:</strong> ${escapeHtml(result.score ?? 0)}/100</li>
                     <li><strong>Reports (90d):</strong> ${reportsValue}</li>
-                    <li><strong>ISP:</strong> ${result.isp}</li>
-                    <li><strong>Country:</strong> ${result.country || 'Unknown'}</li>
-                    <li><strong>Last Reported:</strong> ${result.lastReportedAt}</li>
+                    <li><strong>ISP:</strong> ${value('isp')}</li>
+                    <li><strong>Country:</strong> ${value('country')}</li>
+                    <li><strong>Last Reported:</strong> ${value('lastReportedAt')}</li>
                 `;
             } else if (result.name === 'VirusTotal') {
                 detailsHTML = `
-                    <li><strong>Score:</strong> ${result.score}/100</li>
-                    <li><strong>Malicious:</strong> ${result.maliciousVendors}/${result.totalVendors}</li>
-                    <li><strong>Suspicious:</strong> ${result.suspiciousVendors}</li>
-                    <li><strong>ASN:</strong> ${result.asn}</li>
-                    <li><strong>Country:</strong> ${result.country}</li>
+                    <li><strong>Score:</strong> ${escapeHtml(result.score ?? 0)}/100</li>
+                    <li><strong>Malicious:</strong> ${escapeHtml(result.maliciousVendors ?? 0)}/${escapeHtml(result.totalVendors ?? 0)}</li>
+                    <li><strong>Suspicious:</strong> ${escapeHtml(result.suspiciousVendors ?? 0)}</li>
+                    <li><strong>ASN:</strong> ${value('asn')}</li>
+                    <li><strong>Country:</strong> ${value('country')}</li>
                 `;
             } else if (result.name === 'AlienVault OTX') {
                 detailsHTML = `
-                    <li><strong>Score:</strong> ${result.score}/100</li>
-                    <li><strong>Reputation:</strong> ${result.reputation}</li>
-                    <li><strong>Pulses:</strong> ${result.pulseCount}</li>
-                    <li><strong>Country:</strong> ${result.country}</li>
+                    <li><strong>Score:</strong> ${escapeHtml(result.score ?? 0)}/100</li>
+                    <li><strong>Reputation:</strong> ${value('reputation')}</li>
+                    <li><strong>Pulses:</strong> ${escapeHtml(result.pulseCount ?? 0)}</li>
+                    <li><strong>Country:</strong> ${value('country')}</li>
                     <li><strong>Whitelisted:</strong> ${result.whitelisted ? 'Yes' : 'No'}</li>
                 `;
             } else if (result.name === 'GreyNoise') {
                 const tags = (result.tags && result.tags.length > 0) ? result.tags.join(', ') : 'N/A';
                 detailsHTML = `
-                    <li><strong>Score:</strong> ${result.score}/100</li>
-                    <li><strong>Classification:</strong> ${result.classification}</li>
-                    <li><strong>Tags:</strong> ${tags}</li>
-                    <li><strong>Country:</strong> ${result.country || 'Unknown'}</li>
-                    <li><strong>First Seen:</strong> ${result.firstSeen}</li>
-                    <li><strong>Last Seen:</strong> ${result.lastSeen}</li>
+                    <li><strong>Score:</strong> ${escapeHtml(result.score ?? 0)}/100</li>
+                    <li><strong>Classification:</strong> ${value('classification')}</li>
+                    <li><strong>Tags:</strong> ${escapeHtml(tags)}</li>
+                    <li><strong>Country:</strong> ${value('country')}</li>
+                    <li><strong>First Seen:</strong> ${value('firstSeen')}</li>
+                    <li><strong>Last Seen:</strong> ${value('lastSeen')}</li>
                 `;
             } else if (result.name === 'IPQualityScore') {
                 // Display important free-tier results
@@ -899,22 +1079,22 @@ function displayAPIDetails(apiResults) {
                 const abuseVal = imp.recent_abuse ? 'Yes' : 'No';
                 
                 detailsHTML = `
-                    <li><strong>Fraud Score:</strong> ${imp.fraud_score}/100</li>
-                    <li><strong>Severity:</strong> ${fraudSeverity}</li>
+                    <li><strong>Fraud Score:</strong> ${escapeHtml(imp.fraud_score ?? 0)}/100</li>
+                    <li><strong>Severity:</strong> ${escapeHtml(fraudSeverity)}</li>
                     <li><strong>Proxy:</strong> ${proxyStat}</li>
                     <li><strong>VPN:</strong> ${vpnStat}</li>
                     <li><strong>TOR:</strong> ${torStat}</li>
                     <li><strong>Bot Activity:</strong> ${botStat}</li>
                     <li><strong>Recent Abuse:</strong> ${abuseVal}</li>
-                    <li><strong>Location:</strong> ${imp.city}, ${imp.region}, ${imp.country}</li>
-                    <li><strong>ISP:</strong> ${imp.isp}</li>
-                    <li><strong>ASN:</strong> ${imp.asn}</li>
+                    <li><strong>Location:</strong> ${escapeHtml(imp.city || 'Unknown')}, ${escapeHtml(imp.region || 'Unknown')}, ${escapeHtml(imp.country || 'Unknown')}</li>
+                    <li><strong>ISP:</strong> ${escapeHtml(imp.isp || 'Unknown')}</li>
+                    <li><strong>ASN:</strong> ${escapeHtml(imp.asn || 'Unknown')}</li>
                 `;
             }
             
             card.innerHTML = `
                 <div class="api-card-header">
-                    <span class="api-name">${result.name}</span>
+                    <span class="api-name">${escapeHtml(result.name)}</span>
                     <span class="api-status ${statusClass}">${statusText}</span>
                 </div>
                 <ul class="api-details-list">
@@ -925,11 +1105,11 @@ function displayAPIDetails(apiResults) {
             // API failed
             card.innerHTML = `
                 <div class="api-card-header">
-                    <span class="api-name">${result.name}</span>
+                    <span class="api-name">${escapeHtml(result.name || 'API')}</span>
                     <span class="api-status error">❌ ERROR</span>
                 </div>
                 <p style="color: #ff4757; font-size: 0.9rem; margin: 1rem;">
-                    ${result.error || 'API call failed'}
+                    ${escapeHtml(result.error || 'API call failed')}
                 </p>
             `;
         }
@@ -964,11 +1144,11 @@ function displayReputationAnalysis(scanResults) {
     container.innerHTML = `
         <div class="reputation-item">
             <div class="reputation-label">Overall Reputation</div>
-            <div class="reputation-value">${overallReputation}</div>
+            <div class="reputation-value">${escapeHtml(overallReputation)}</div>
         </div>
         <div class="reputation-item">
             <div class="reputation-label">API Consensus</div>
-            <div class="reputation-value">${consensus} (${maliciousAPIs}/${totalAPIs} APIs)</div>
+            <div class="reputation-value">${escapeHtml(consensus)} (${maliciousAPIs}/${totalAPIs} APIs)</div>
         </div>
         <div class="reputation-item">
             <div class="reputation-label">Average Threat Score</div>
@@ -976,7 +1156,7 @@ function displayReputationAnalysis(scanResults) {
         </div>
         <div class="reputation-item">
             <div class="reputation-label">Threat Classification</div>
-            <div class="reputation-value">${threatCategory}</div>
+            <div class="reputation-value">${escapeHtml(threatCategory)}</div>
         </div>
     `;
 }
@@ -1062,12 +1242,12 @@ function renderThreatMarker(location) {
 
     marker.bindPopup(`
         <div style="color: #e4e8f0; background: #141829; padding: 8px; border-radius: 4px;">
-            <strong>${location.country}</strong><br>
-            IP: ${location.ip}<br>
+            <strong>${escapeHtml(location.country)}</strong><br>
+            IP: ${escapeHtml(location.ip)}<br>
             Score: ${formatScore(location.score)}/100<br>
             Threat: ${level.toUpperCase()}<br>
-            ${location.timestamp ? `Scanned: ${location.timestamp}<br>` : ''}
-            ${location.source ? `Source: ${location.source}` : ''}
+            ${location.timestamp ? `Scanned: ${escapeHtml(location.timestamp)}<br>` : ''}
+            ${location.source ? `Source: ${escapeHtml(location.source)}` : ''}
         </div>
     `);
 
@@ -1191,28 +1371,81 @@ function initializeMap() {
 
 function initializeAlerts() {
     const filterBtns = document.querySelectorAll('.filter-btn');
-    let currentFilter = 'all';
+    const searchInput = document.getElementById('alertsSearch');
+    const sortSelect = document.getElementById('alertsSort');
 
     filterBtns.forEach(btn => {
         btn.addEventListener('click', (e) => {
             filterBtns.forEach(b => b.classList.remove('active'));
             e.target.classList.add('active');
-            currentFilter = e.target.getAttribute('data-filter');
-            displayAlerts(currentFilter);
+            currentAlertFilter = e.target.getAttribute('data-filter');
+            displayAlerts(currentAlertFilter);
         });
     });
 
+    if (searchInput) {
+        searchInput.addEventListener('input', () => displayAlerts(currentAlertFilter));
+    }
+
+    if (sortSelect) {
+        sortSelect.addEventListener('change', () => displayAlerts(currentAlertFilter));
+    }
+
     displayAlerts('all');
-    loadAlertsFromBackend(currentFilter);
+    loadAlertsFromBackend(currentAlertFilter);
 
     if (!alertsRefreshTimer) {
         alertsRefreshTimer = setInterval(() => {
-            loadAlertsFromBackend(currentFilter, false);
+            loadAlertsFromBackend(currentAlertFilter, false);
         }, 10000);
     }
 }
 
-function displayAlerts(filter = 'all') {
+function getFilteredAlerts(filter = currentAlertFilter) {
+    const searchInput = document.getElementById('alertsSearch');
+    const sortSelect = document.getElementById('alertsSort');
+    const search = (searchInput?.value || '').trim().toLowerCase();
+    const sort = sortSelect?.value || 'last-desc';
+
+    let filtered = alertsData.filter(alert => {
+        const matchesFilter = filter === 'all' || alert.severity === filter;
+        const matchesSearch = !search ||
+            String(alert.ip || '').toLowerCase().includes(search) ||
+            String(alert.type || '').toLowerCase().includes(search) ||
+            String(alert.description || '').toLowerCase().includes(search) ||
+            String(alert.source || '').toLowerCase().includes(search);
+        return matchesFilter && matchesSearch;
+    });
+
+    filtered.sort((a, b) => {
+        const aTs = Date.parse(a.lastSeen || a.time) || 0;
+        const bTs = Date.parse(b.lastSeen || b.time) || 0;
+        const aAttempts = Number(a.attemptCount) || 0;
+        const bAttempts = Number(b.attemptCount) || 0;
+        const aSeverity = getSeverityRank(a.severity);
+        const bSeverity = getSeverityRank(b.severity);
+
+        switch (sort) {
+            case 'last-asc':
+                return aTs - bTs;
+            case 'attempts-desc':
+                return bAttempts - aAttempts;
+            case 'attempts-asc':
+                return aAttempts - bAttempts;
+            case 'severity-desc':
+                return bSeverity - aSeverity || bTs - aTs;
+            case 'severity-asc':
+                return aSeverity - bSeverity || bTs - aTs;
+            case 'last-desc':
+            default:
+                return bTs - aTs;
+        }
+    });
+
+    return filtered;
+}
+
+function displayAlerts(filter = currentAlertFilter) {
     const container = document.getElementById('alertsContainer');
     container.innerHTML = '';
     const criticalCount = alertsData.filter(a => a.severity === 'critical').length;
@@ -1241,38 +1474,40 @@ function displayAlerts(filter = 'all') {
         criticalBadge.style.display = criticalCount ? 'inline-flex' : 'none';
     }
 
-    const filtered = filter === 'all' ? alertsData : alertsData.filter(a => a.severity === filter);
+    const filtered = getFilteredAlerts(filter);
 
     filtered.forEach(alert => {
         const card = document.createElement('div');
         card.className = `alert-card ${alert.severity}`;
         card.innerHTML = `
             <div class="alert-card-header">
-                <span class="alert-type">${alert.type}</span>
-                <span class="alert-severity ${alert.severity}">${alert.severity}</span>
+                <span class="alert-type">${escapeHtml(alert.type)}</span>
+                <span class="alert-severity ${escapeHtml(alert.severity)}">${escapeHtml(alert.severity)}</span>
             </div>
             <div class="alert-details">
                 <div class="alert-detail-row">
                     <label>IP Address</label>
-                    <value><code>${alert.ip}</code></value>
+                    <value><code>${escapeHtml(alert.ip)}</code></value>
                 </div>
                 <div class="alert-detail-row">
                     <label>Description</label>
-                    <value>${alert.description}</value>
+                    <value>${escapeHtml(alert.description)}</value>
                 </div>
             </div>
             <div class="alert-time">
-                <i class="fas fa-clock"></i> Detected at ${alert.time}
+                <i class="fas fa-clock"></i> Last seen at ${escapeHtml(alert.time)}
             </div>
             <div class="alert-actions-row">
-                <button class="btn-action btn-details" onclick="showAlertDetails('${alert.id}')">
+                <button class="btn-action btn-details" type="button">
                     <i class="fas fa-expand"></i> Details
                 </button>
-                <button class="btn-action btn-block" onclick="blockIP('${alert.ip}')">
+                <button class="btn-action btn-block" type="button">
                     <i class="fas fa-ban"></i> Block
                 </button>
             </div>
         `;
+        card.querySelector('.btn-details').addEventListener('click', () => showAlertDetails(alert.id));
+        card.querySelector('.btn-block').addEventListener('click', () => blockIP(alert.ip));
         container.appendChild(card);
     });
 
@@ -1290,7 +1525,9 @@ function normalizeAlert(alert) {
         type: alert?.type || alert?.alert_type || 'Threat Alert',
         ip: alert?.ip || alert?.ip_address || 'Unknown',
         severity: getAlertSeverityFromAttempts(attemptCount, alert?.severity),
-        time: alert?.time || alert?.created_at || new Date().toLocaleString(),
+        firstSeen: alert?.firstSeen || alert?.first_seen || alert?.created_at || '',
+        lastSeen: alert?.lastSeen || alert?.last_seen || alert?.updated_at || alert?.time || '',
+        time: alert?.time || alert?.lastSeen || alert?.last_seen || alert?.updated_at || new Date().toLocaleString(),
         description: alert?.description || alert?.logLine || 'No description available',
         attemptCount,
         targetIp: alert?.targetIp || alert?.target_ip || '',
@@ -1311,6 +1548,7 @@ async function loadAlertsFromBackend(filter = 'all', notifyOnError = true) {
             ? payload.alerts.map(normalizeAlert)
             : [];
         const nextAlertIds = new Set(nextAlerts.map(alert => String(alert.id)));
+        const previousAlertsById = new Map(alertsData.map(alert => [String(alert.id), alert]));
         const isInitialAlertLoad = !hasBootstrappedBackendAlerts;
 
         if (isInitialAlertLoad) {
@@ -1320,9 +1558,12 @@ async function loadAlertsFromBackend(filter = 'all', notifyOnError = true) {
         } else {
             nextAlerts.forEach(alert => {
                 const alertId = String(alert.id);
+                const previousAlert = previousAlertsById.get(alertId);
                 if (!shownAlertIds.has(alertId)) {
                     showRealtimeAlertPopup(alert);
                     shownAlertIds.add(alertId);
+                } else if (shouldShowGroupedAlertPopup(alert, previousAlert)) {
+                    showRealtimeAlertPopup(alert);
                 }
             });
             saveShownAlertIds();
@@ -1331,6 +1572,7 @@ async function loadAlertsFromBackend(filter = 'all', notifyOnError = true) {
         alertsData = nextAlerts;
         knownAlertIds = nextAlertIds;
         displayAlerts(filter);
+        loadAlertStatsFromBackend(false);
     } catch (error) {
         console.error('Failed to load alerts:', error);
         alertsData = [...fallbackAlerts];
@@ -1365,11 +1607,35 @@ async function clearAllAlerts() {
         shownAlertIds = new Set();
         localStorage.removeItem(SHOWN_ALERTS_STORAGE_KEY);
         displayAlerts('all');
+        loadAlertStatsFromBackend(false);
         showToast('All alerts cleared', 'success');
     } catch (error) {
         console.error('Failed to clear alerts:', error);
         showToast(`Failed to clear alerts: ${error.message}`, 'error');
     }
+}
+
+function getAlertExportHeaders() {
+    return [
+        { label: 'IP Address', value: 'ip' },
+        { label: 'Attack Type', value: 'type' },
+        { label: 'Severity', value: 'severity' },
+        { label: 'Attempts', value: 'attemptCount' },
+        { label: 'First Seen', value: 'firstSeen' },
+        { label: 'Last Seen', value: 'lastSeen' },
+        { label: 'Target IP', value: 'targetIp' },
+        { label: 'Description', value: 'description' },
+        { label: 'Log Entry', value: 'logLine' },
+        { label: 'Source', value: 'source' }
+    ];
+}
+
+function exportAlertsCsv() {
+    exportRowsToCsv('alerts-export.csv', getAlertExportHeaders(), getFilteredAlerts(currentAlertFilter));
+}
+
+function exportAlertsPdf() {
+    exportRowsToPdf('Alerts Export', getAlertExportHeaders(), getFilteredAlerts(currentAlertFilter));
 }
 
 // ========== THREAT LOGS TAB ==========
@@ -1459,6 +1725,25 @@ function setupLogsControls() {
     });
 }
 
+function getLogExportHeaders() {
+    return [
+        { label: 'IP Address', value: 'ip' },
+        { label: 'Country', value: 'country' },
+        { label: 'Threat Score', value: row => formatScore(row.score) },
+        { label: 'API Source', value: 'api' },
+        { label: 'Date & Time', value: 'date' },
+        { label: 'Status', value: row => formatLogStatus(row.status) }
+    ];
+}
+
+function exportLogsCsv() {
+    exportRowsToCsv('scan-logs-export.csv', getLogExportHeaders(), getFilteredLogs());
+}
+
+function exportLogsPdf() {
+    exportRowsToPdf('Scan Logs Export', getLogExportHeaders(), getFilteredLogs());
+}
+
 function getFilteredLogs() {
     const search = document.getElementById('logsSearch').value.toLowerCase();
     const filter = document.getElementById('logsFilter').value;
@@ -1513,22 +1798,23 @@ function displayLogsTable() {
 
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td><code>${log.ip}</code></td>
+            <td><code>${escapeHtml(log.ip)}</code></td>
             <td>
                 <span class="country-cell">
-                    <span class="flag">${log.flag}</span>${log.country}
+                    <span class="flag">${escapeHtml(log.flag)}</span>${escapeHtml(log.country)}
                 </span>
             </td>
             <td><span class="threat-score-badge ${threatLevel}">${formatScore(log.score)}</span></td>
-            <td>${log.api}</td>
-            <td>${log.date}</td>
+            <td>${escapeHtml(log.api)}</td>
+            <td>${escapeHtml(log.date)}</td>
             <td><span class="status-badge-log ${(log.status || '').toLowerCase()}">${formatLogStatus(log.status)}</span></td>
             <td>
-                <button class="btn-action btn-details ${isExpanded ? 'active' : ''}" onclick="expandLogDetail('${log.id}')">
+                <button class="btn-action btn-details ${isExpanded ? 'active' : ''}" type="button">
                     <i class="fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'}"></i>
                 </button>
             </td>
         `;
+        row.querySelector('.btn-details').addEventListener('click', () => expandLogDetail(log.id));
         tbody.appendChild(row);
 
         if (isExpanded) {
@@ -1608,16 +1894,17 @@ function buildLogDetailsContent(log) {
     const resultCards = (log.scanResults && log.scanResults.length > 0)
         ? log.scanResults.map(result => {
             const status = result.success ? (result.isMalicious ? 'Malicious' : 'Clean') : 'Error';
+            const resultCountry = result.country ? normalizeCountryInfo(result.country).country : '';
             return `
                 <div style="border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px;">
                     <div style="display:flex; justify-content:space-between; gap:8px;">
-                        <strong>${result.name || 'API'}</strong>
-                        <span>${status}</span>
+                        <strong>${escapeHtml(result.name || 'API')}</strong>
+                        <span>${escapeHtml(status)}</span>
                     </div>
                     <div style="margin-top:6px; font-size:0.9rem; color:#c7d0e0;">
                         Score: ${result.score ?? 0}/100
-                        ${result.country ? `<br>Country: ${normalizeCountryInfo(result.country).country}` : ''}
-                        ${result.error ? `<br>Error: ${result.error}` : ''}
+                        ${resultCountry ? `<br>Country: ${escapeHtml(resultCountry)}` : ''}
+                        ${result.error ? `<br>Error: ${escapeHtml(result.error)}` : ''}
                     </div>
                 </div>
             `;
@@ -1627,10 +1914,10 @@ function buildLogDetailsContent(log) {
     return `
         <div style="padding: 12px; background: rgba(0,0,0,0.2); border-radius: 8px;">
             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px;">
-                <div><strong>IP/Target:</strong> <code>${log.ip}</code></div>
-                <div><strong>Country:</strong> ${log.flag} ${log.country}</div>
+                <div><strong>IP/Target:</strong> <code>${escapeHtml(log.ip)}</code></div>
+                <div><strong>Country:</strong> ${escapeHtml(log.flag)} ${escapeHtml(log.country)}</div>
                 <div><strong>Threat:</strong> <span class="threat-score-badge ${threatLevel}">${formatScore(log.score)}</span></div>
-                <div><strong>Status:</strong> ${formatLogStatus(log.status)}</div>
+                <div><strong>Status:</strong> ${escapeHtml(formatLogStatus(log.status))}</div>
             </div>
             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
                 ${resultCards}
