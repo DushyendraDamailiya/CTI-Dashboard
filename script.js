@@ -1279,6 +1279,22 @@ function renderThreatMarker(location) {
     mapMarkers.push(marker);
 }
 
+function clearRenderedMapMarkers() {
+    while (mapMarkers.length) {
+        const marker = mapMarkers.pop();
+        if (mapInstance && marker) {
+            mapInstance.removeLayer(marker);
+        }
+    }
+}
+
+function renderStoredMapLocations() {
+    if (!mapInstance) return;
+    clearRenderedMapMarkers();
+    scannedThreatLocations.forEach(renderThreatMarker);
+    updateMapStats();
+}
+
 function updateMapStats() {
     const allLocations = [...scannedThreatLocations];
     const uniqueCountries = new Set(allLocations.map(loc => loc.country));
@@ -1351,13 +1367,29 @@ function addScanResultToMap(ip, scanResponse) {
         timestamp: new Date().toLocaleString()
     };
 
-    scannedThreatLocations.push(location);
+    const existingIndex = scannedThreatLocations.findIndex(item => item.ip === ip);
+    if (existingIndex >= 0) {
+        scannedThreatLocations[existingIndex] = location;
+    } else {
+        scannedThreatLocations.push(location);
+    }
     saveScannedMapLocations();
 
     if (mapInstance) {
-        renderThreatMarker(location);
-        updateMapStats();
+        renderStoredMapLocations();
     }
+}
+
+function clearAllMapLocations() {
+    if (!scannedThreatLocations.length) {
+        showToast('No saved map locations to clear', 'info');
+        return;
+    }
+
+    scannedThreatLocations.length = 0;
+    saveScannedMapLocations();
+    renderStoredMapLocations();
+    showToast('Saved map locations cleared', 'success');
 }
 
 function initializeMap() {
@@ -1377,9 +1409,8 @@ function initializeMap() {
         maxZoom: 19
     }).addTo(mapInstance);
 
-    // Render only scanned markers (keep previous scanned entries)
-    [...scannedThreatLocations].forEach(renderThreatMarker);
-    updateMapStats();
+    // Render only saved manual scan markers.
+    renderStoredMapLocations();
 
     // Setup map controls
     document.getElementById('toggleHeatmap').addEventListener('click', () => {
@@ -1390,6 +1421,11 @@ function initializeMap() {
         mapInstance.setView([20, 0], 2);
         showToast('Map view reset', 'success');
     });
+
+    const clearMapLocationsBtn = document.getElementById('clearMapLocations');
+    if (clearMapLocationsBtn) {
+        clearMapLocationsBtn.addEventListener('click', clearAllMapLocations);
+    }
 }
 
 // ========== ALERTS TAB ==========
