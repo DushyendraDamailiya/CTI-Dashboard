@@ -1,213 +1,166 @@
 #!/usr/bin/env python3
 """
-Quick Firewall Blocking Test Script
-Tests if firewall blocking is working on your system
+Test whether local firewall blocking commands are available.
+
+This script uses the documentation IP 203.0.113.1 and removes any test
+rule it creates.
 """
 
-import subprocess
 import platform
+import shutil
+import subprocess
 import sys
-import json
 
-TEST_IP = "203.0.113.1"  # Documentation test IP (TEST-NET-3, not routable)
+TEST_IP = "203.0.113.1"  # TEST-NET-3, reserved for documentation.
+
+
+def run(command, timeout=5):
+    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+
+def require_sudo():
+    try:
+        result = run(["sudo", "-n", "true"], timeout=2)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("[fail] sudo is not available or timed out")
+        return False
+
+    if result.returncode != 0:
+        print("[fail] sudo password is required")
+        print("       Run setup first: sudo bash setup-firewall-blocking.sh")
+        return False
+
+    print("[ok] sudo access confirmed")
+    return True
+
 
 def test_macos():
-    print("🍎 Testing macOS Firewall Blocking")
-    print("─" * 50)
-    
+    print("Testing macOS firewall blocking")
+    print("-" * 40)
+
+    if not require_sudo():
+        return False
+
     try:
-        # Check if sudo works without password
-        result = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=2)
+        result = run(["sudo", "route", "add", "-net", TEST_IP, "127.0.0.1"])
         if result.returncode != 0:
-            print("❌ Sudo password required (run: sudo bash setup-firewall-blocking.sh)")
+            print("[fail] route add failed")
+            print(result.stderr or result.stdout)
             return False
-        
-        print("✅ Sudo passwordless access confirmed")
-        
-        # Test block
-        print(f"\n📋 Testing block rule for {TEST_IP}...")
-        result = subprocess.run(
-            ['sudo', 'route', 'add', '-net', TEST_IP, '127.0.0.1'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode == 0:
-            print(f"✅ Successfully added route for {TEST_IP}")
-            
-            # Verify it exists
-            result = subprocess.run(['netstat', '-rn'], capture_output=True, text=True)
-            if TEST_IP in result.stdout:
-                print(f"✅ Route verified with netstat")
-            
-            # Cleanup
-            subprocess.run(['sudo', 'route', 'delete', '-net', TEST_IP], 
-                         capture_output=True, timeout=5)
-            print(f"✅ Cleaned up test route")
-            return True
-        else:
-            print(f"❌ Route command failed:")
-            print(result.stderr)
-            return False
-    
+
+        print(f"[ok] Added test route for {TEST_IP}")
+        verify = run(["netstat", "-rn"])
+        if TEST_IP in verify.stdout:
+            print("[ok] Route verified")
+        return True
     except subprocess.TimeoutExpired:
-        print("❌ Command timed out")
+        print("[fail] command timed out")
         return False
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
+    finally:
+        subprocess.run(["sudo", "route", "delete", "-net", TEST_IP], capture_output=True, timeout=5)
+        print("[ok] Removed test route")
+
 
 def test_linux():
-    print("🐧 Testing Linux Firewall Blocking")
-    print("─" * 50)
-    
+    print("Testing Linux firewall blocking")
+    print("-" * 40)
+
+    if not require_sudo():
+        return False
+
+    iptables = shutil.which("iptables")
+    if not iptables:
+        print("[fail] iptables not found")
+        print("       Install it first, for example: sudo apt-get install iptables")
+        return False
+
     try:
-        # Check if sudo works without password
-        result = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=2)
+        result = run(["sudo", iptables, "-I", "INPUT", "1", "-s", TEST_IP, "-j", "DROP"])
         if result.returncode != 0:
-            print("❌ Sudo password required (run: sudo bash setup-firewall-blocking.sh)")
+            print("[fail] iptables rule add failed")
+            print(result.stderr or result.stdout)
             return False
-        
-        print("✅ Sudo passwordless access confirmed")
-        
-        # Check iptables exists
-        result = subprocess.run(['which', 'iptables'], capture_output=True)
-        if result.returncode != 0:
-            print("❌ iptables not found. Install with: sudo apt-get install iptables")
-            return False
-        
-        print("✅ iptables found")
-        
-        # Test block
-        print(f"\n📋 Testing block rule for {TEST_IP}...")
-        result = subprocess.run(
-            ['sudo', 'iptables', '-I', 'INPUT', '1', '-s', TEST_IP, '-j', 'DROP'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode == 0:
-            print(f"✅ Successfully added iptables rule for {TEST_IP}")
-            
-            # Verify it exists
-            result = subprocess.run(['sudo', 'iptables', '-L', '-n', '-v'], 
-                                  capture_output=True, text=True)
-            if TEST_IP in result.stdout:
-                print(f"✅ Rule verified with iptables -L")
-            
-            # Cleanup
-            subprocess.run(['sudo', 'iptables', '-D', 'INPUT', '-s', TEST_IP, '-j', 'DROP'], 
-                         capture_output=True, timeout=5)
-            print(f"✅ Cleaned up test rule")
-            return True
-        else:
-            print(f"❌ iptables command failed:")
-            print(result.stderr)
-            return False
-    
+
+        print("[ok] Added test iptables rule")
+        verify = run(["sudo", iptables, "-L", "-n", "-v"])
+        if TEST_IP in verify.stdout:
+            print("[ok] Rule verified")
+        return True
     except subprocess.TimeoutExpired:
-        print("❌ Command timed out")
+        print("[fail] command timed out")
         return False
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
+    finally:
+        subprocess.run(["sudo", iptables, "-D", "INPUT", "-s", TEST_IP, "-j", "DROP"], capture_output=True, timeout=5)
+        print("[ok] Removed test rule")
+
 
 def test_windows():
-    print("🪟 Testing Windows Firewall Blocking")
-    print("─" * 50)
-    
+    print("Testing Windows firewall blocking")
+    print("-" * 40)
+
     try:
-        # Check if running as admin
-        result = subprocess.run(['netsh', 'advfirewall', 'show', 'allprofiles'], 
-                              capture_output=True, text=True, timeout=5)
-        if 'Access Denied' in result.stderr or result.returncode != 0:
-            print("❌ Not running as Administrator")
-            print("   Run PowerShell as Admin and start backend with: python backend.py")
+        admin_check = run(["netsh", "advfirewall", "show", "allprofiles"])
+        if admin_check.returncode != 0 or "Access Denied" in admin_check.stderr:
+            print("[fail] Not running as Administrator")
+            print("       Start PowerShell as Administrator, then run this test.")
             return False
-        
-        print("✅ Administrator privileges confirmed")
-        
-        # Test block
+
         rule_name = f"TEST_BLOCK_{TEST_IP.replace('.', '_')}"
-        print(f"\n📋 Testing firewall rule: {rule_name}")
-        
-        result = subprocess.run(
-            ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
-             f'name={rule_name}',
-             'dir=in', 'action=block',
-             f'remoteip={TEST_IP}',
-             'protocol=any'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode == 0:
-            print(f"✅ Successfully added firewall rule")
-            
-            # List to verify
-            result = subprocess.run(
-                ['netsh', 'advfirewall', 'firewall', 'show', 'rule', f'name={rule_name}'],
-                capture_output=True,
-                text=True
-            )
-            if rule_name in result.stdout:
-                print(f"✅ Rule verified")
-            
-            # Cleanup
-            subprocess.run(
-                ['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rule_name}'],
-                capture_output=True,
-                timeout=5
-            )
-            print(f"✅ Cleaned up test rule")
-            return True
-        else:
-            print(f"❌ Firewall command failed:")
-            print(result.stderr)
+        result = run([
+            "netsh", "advfirewall", "firewall", "add", "rule",
+            f"name={rule_name}",
+            "dir=in",
+            "action=block",
+            f"remoteip={TEST_IP}",
+            "protocol=any",
+        ])
+        if result.returncode != 0:
+            print("[fail] Windows Firewall rule add failed")
+            print(result.stderr or result.stdout)
             return False
-    
+
+        print("[ok] Added Windows Firewall test rule")
+        verify = run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"])
+        if rule_name in verify.stdout:
+            print("[ok] Rule verified")
+        return True
     except subprocess.TimeoutExpired:
-        print("❌ Command timed out")
+        print("[fail] command timed out")
         return False
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return False
+    finally:
+        subprocess.run([
+            "netsh", "advfirewall", "firewall", "delete", "rule",
+            f"name=TEST_BLOCK_{TEST_IP.replace('.', '_')}",
+        ], capture_output=True, timeout=5)
+        print("[ok] Removed test rule")
+
 
 def main():
-    print("\n🔒 Firewall Blocking Capability Test")
-    print("═" * 50)
-    print(f"Test IP: {TEST_IP} (documentation test IP)\n")
-    
+    print("Firewall Blocking Capability Test")
+    print("=" * 40)
+    print(f"Test IP: {TEST_IP}")
+    print("")
+
     system = platform.system()
-    result = False
-    
-    if system == 'Darwin':
-        result = test_macos()
-    elif system == 'Linux':
-        result = test_linux()
-    elif system == 'Windows':
-        result = test_windows()
+    if system == "Darwin":
+        ok = test_macos()
+    elif system == "Linux":
+        ok = test_linux()
+    elif system == "Windows":
+        ok = test_windows()
     else:
-        print(f"❌ Unsupported OS: {system}")
-        return 1
-    
-    print("\n" + "═" * 50)
-    if result:
-        print("✅ FIREWALL BLOCKING IS READY!")
-        print("\nYou can now:")
-        print("1. Start your backend: python backend.py")
-        print("2. Block IPs from the dashboard")
-        print("3. This will add real firewall rules to your system")
-        return 0
-    else:
-        print("❌ FIREWALL BLOCKING NOT READY")
-        print("\nNext steps:")
-        print("  1. Run setup: sudo bash setup-firewall-blocking.sh")
-        print("  2. Run this test again")
+        print(f"[fail] Unsupported OS: {system}")
         return 1
 
-if __name__ == '__main__':
+    print("")
+    print("=" * 40)
+    if ok:
+        print("[ok] Firewall blocking is ready")
+        return 0
+
+    print("[fail] Firewall blocking is not ready")
+    return 1
+
+
+if __name__ == "__main__":
     sys.exit(main())
