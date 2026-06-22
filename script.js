@@ -11,7 +11,9 @@ const API_ENDPOINTS = {
     block: `${BACKEND_URL}/api/block-ip`,
     alerts: `${BACKEND_URL}/api/alerts`,
     alertStats: `${BACKEND_URL}/api/alert-stats`,
-    threatLogs: `${BACKEND_URL}/api/threat-logs`
+    threatLogs: `${BACKEND_URL}/api/threat-logs`,
+    edrDashboard: `${BACKEND_URL}/api/edr/dashboard`,
+    edrResponse: `${BACKEND_URL}/api/edr/respond`
 };
 
 // ========== INPUT VALIDATION FUNCTIONS ==========
@@ -90,8 +92,6 @@ const CONFIG = {
         alienvault: { name: 'AlienVault OTX', color: '#ffa502' },
         greynoise: { name: 'GreyNoise', color: '#2ed573' }
     },
-    
-    refreshInterval: 5000, // 5 seconds for live data
     threatScoreThresholds: {
         critical: 80,
         high: 60,
@@ -122,14 +122,40 @@ const fallbackAlerts = [
     { type: 'Data Exfiltration', ip: '185.199.108.153', severity: 'high', time: getRecentTime(12), description: 'Unusual data transfer volume detected' }
 ];
 
+function createEmptyEDRDashboard() {
+    return {
+        summary: {
+            totalEndpoints: 0,
+            onlineEndpoints: 0,
+            offlineEndpoints: 0,
+            openAlerts: 0,
+            criticalAlerts: 0,
+            eventsToday: 0,
+            responses: 0
+        },
+        endpoints: [],
+        events: [],
+        alerts: [],
+        responses: [],
+        heartbeatTimeoutSeconds: EDR_DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
+        coverage: []
+    };
+}
+
 const SHOWN_ALERTS_STORAGE_KEY = 'shownRealtimeAlertIds';
 const mockLogsData = [];
+const EDR_DASHBOARD_REFRESH_MS = 5000;
+const EDR_DASHBOARD_REQUEST_TIMEOUT_MS = 7000;
+const EDR_DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 20;
 let alertsData = [...fallbackAlerts];
 let alertsRefreshTimer = null;
+let edrRefreshTimer = null;
 let knownAlertIds = new Set();
 let shownAlertIds = loadShownAlertIds();
 let hasBootstrappedBackendAlerts = false;
 let currentAlertFilter = 'all';
+let edrDashboardData = createEmptyEDRDashboard();
+let isLoadingEDRDashboard = false;
 
 function loadShownAlertIds() {
     try {
@@ -402,8 +428,8 @@ function initializeTabNavigation() {
 
 function initializeMonitoring() {
     updateKPICards();
-    populateThreatTable();
     initializeCharts();
+    initializeEDRDashboard();
     setupLiveUpdates();
 }
 
@@ -411,38 +437,6 @@ function updateKPICards() {
     document.getElementById('totalRequests').textContent = Math.floor(Math.random() * 20000 + 10000).toLocaleString();
     document.getElementById('maliciousCount').textContent = mockThreats.length;
     document.getElementById('criticalAlerts').textContent = alertsData.filter(a => a.severity === 'critical').length;
-}
-
-function populateThreatTable(threats = mockThreats) {
-    const tbody = document.getElementById('threatTableBody');
-    tbody.innerHTML = '';
-
-    threats.forEach((threat) => {
-        const row = document.createElement('tr');
-        const threatLevel = getThreatLevel(threat.score);
-        
-        row.innerHTML = `
-            <td><code>${escapeHtml(threat.ip)}</code></td>
-            <td><span class="country-cell"><span class="flag">${escapeHtml(getCountryBadge(threat.country))}</span>${escapeHtml(threat.country)}</span></td>
-            <td><span class="threat-score-badge ${threatLevel}">${formatScore(threat.score)}</span></td>
-            <td>${escapeHtml(threat.type)}</td>
-            <td><span class="api-source">${escapeHtml(threat.api)}</span></td>
-            <td>${escapeHtml(threat.timestamp)}</td>
-            <td>
-                <div class="action-buttons">
-                    <button class="btn-action btn-block" type="button">
-                        <i class="fas fa-ban"></i> Block
-                    </button>
-                    <button class="btn-action btn-details" type="button">
-                        <i class="fas fa-expand"></i> Details
-                    </button>
-                </div>
-            </td>
-        `;
-        row.querySelector('.btn-block').addEventListener('click', () => blockIP(threat.ip));
-        row.querySelector('.btn-details').addEventListener('click', () => showDetails(threat.ip));
-        tbody.appendChild(row);
-    });
 }
 
 async function blockIP(ip) {
@@ -499,8 +493,6 @@ async function blockIP(ip) {
             showToast(message, 'success');
         }
         
-        console.log(`Blocking IP: ${ip}`, result);
-        
     } catch (error) {
         console.error('Block IP error:', error);
         showToast(`Block failed: ${error.message}`, 'error');
@@ -516,10 +508,13 @@ function showDetails(ip) {
     const modal = document.getElementById('detailModal');
     const modalBody = document.getElementById('modalBody');
     const modalTitle = modal.querySelector('.modal-header h2');
+    const blockBtn = document.getElementById('modalBlockBtn');
 
     if (modalTitle) {
         modalTitle.textContent = 'IP Details';
     }
+    blockBtn.textContent = 'Block IP';
+    blockBtn.disabled = false;
 
     modalBody.innerHTML = `
         <div class="modal-detail-row">
@@ -556,7 +551,7 @@ function showDetails(ip) {
         </div>
     `;
 
-    document.getElementById('modalBlockBtn').onclick = () => {
+    blockBtn.onclick = () => {
         blockIP(ip);
         modal.classList.add('hidden');
     };
@@ -607,6 +602,7 @@ function showAlertDetails(alertId) {
     if (modalTitle) {
         modalTitle.textContent = 'Alert Details';
     }
+    blockBtn.textContent = 'Block IP';
 
     modalBody.innerHTML = `
         <div class="modal-detail-row">
@@ -680,44 +676,680 @@ function getThreatColor(level) {
 }
 
 function setupLiveUpdates() {
-    const refreshBtn = document.getElementById('refreshBtn');
-    const searchInput = document.getElementById('ipSearch');
+    const refreshBtn = document.getElementById('edrRefreshBtn');
+    const searchInput = document.getElementById('edrSearch');
+    const filterSelect = document.getElementById('edrFilter');
 
-    refreshBtn.addEventListener('click', () => {
-        refreshBtn.style.animation = 'none';
-        setTimeout(() => {
-            refreshBtn.style.animation = 'spin 1s linear';
-            // Simulate new threat data
-            const country = getRandomCountry();
-            const newThreat = {
-                ip: generateRandomIP(),
-                country,
-                flag: getCountryFlag(country),
-                score: Math.floor(Math.random() * 100),
-                type: ['Botnet', 'DDoS', 'Malware', 'Phishing'][Math.floor(Math.random() * 4)],
-                api: ['AbuseIPDB', 'VirusTotal', 'AlienVault OTX', 'GreyNoise'][Math.floor(Math.random() * 4)],
-                timestamp: getRecentTime(0)
-            };
-            mockThreats.unshift(newThreat);
-            if (mockThreats.length > 8) mockThreats.pop();
-            populateThreatTable();
-            updateKPICards();
-        }, 600);
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            await loadEDRDashboardFromBackend(true, { force: true });
+        });
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', () => renderEDRDashboard());
+    }
+
+    if (filterSelect) {
+        filterSelect.addEventListener('change', () => renderEDRDashboard());
+    }
+
+    startEDRAutoRefresh();
+}
+
+// ========== EDR DASHBOARD ==========
+
+function initializeEDRDashboard() {
+    renderEDRDashboard();
+    loadEDRDashboardFromBackend(false, { force: true, showLoading: false });
+}
+
+function startEDRAutoRefresh() {
+    if (edrRefreshTimer) {
+        return;
+    }
+
+    edrRefreshTimer = setInterval(() => {
+        loadEDRDashboardFromBackend(false, { showLoading: false });
+    }, EDR_DASHBOARD_REFRESH_MS);
+}
+
+function setEDRRefreshState(isLoading) {
+    const refreshBtn = document.getElementById('edrRefreshBtn');
+    if (!refreshBtn) return;
+
+    refreshBtn.disabled = isLoading;
+    refreshBtn.classList.toggle('is-loading', isLoading);
+    refreshBtn.innerHTML = isLoading
+        ? '<i class="fas fa-sync"></i> Refreshing'
+        : '<i class="fas fa-sync"></i> Refresh';
+}
+
+function getEDRHeartbeatTimeoutMs(data = edrDashboardData) {
+    const seconds = Number(data?.heartbeatTimeoutSeconds || EDR_DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
+    return Math.max(10, seconds) * 1000;
+}
+
+function computeEDREndpointStatus(endpoint, data = edrDashboardData) {
+    const parsed = new Date(endpoint?.last_seen || endpoint?.timestamp || '');
+    if (Number.isNaN(parsed.getTime())) {
+        return 'offline';
+    }
+
+    return Date.now() - parsed.getTime() <= getEDRHeartbeatTimeoutMs(data)
+        ? 'online'
+        : 'offline';
+}
+
+function refreshLocalEDRLiveness() {
+    const endpoints = Array.isArray(edrDashboardData.endpoints) ? edrDashboardData.endpoints : [];
+    endpoints.forEach(endpoint => {
+        endpoint.status = computeEDREndpointStatus(endpoint);
     });
 
-    searchInput.addEventListener('input', (e) => {
-        const query = e.target.value.toLowerCase();
-        const filtered = mockThreats.filter(threat => threat.ip.toLowerCase().includes(query));
-        populateThreatTable(filtered);
-    });
+    const summary = edrDashboardData.summary || {};
+    summary.totalEndpoints = endpoints.length;
+    summary.onlineEndpoints = endpoints.filter(endpoint => endpoint.status === 'online').length;
+    summary.offlineEndpoints = endpoints.length - summary.onlineEndpoints;
+    edrDashboardData.summary = summary;
+}
 
-    // Auto-refresh every 5 seconds
-    setInterval(() => {
-        if (!document.getElementById('monitoring').classList.contains('active')) return;
-        const randomThreat = mockThreats[Math.floor(Math.random() * mockThreats.length)];
-        randomThreat.score = Math.floor(Math.random() * 100);
-        populateThreatTable();
-    }, CONFIG.refreshInterval);
+async function fetchWithTimeout(url, options = {}, timeoutMs = EDR_DASHBOARD_REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, {
+            ...options,
+            signal: controller.signal
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+function normalizeEDRDashboardPayload(payload) {
+    const empty = createEmptyEDRDashboard();
+    const heartbeatTimeoutSeconds = Number(payload?.heartbeatTimeoutSeconds || EDR_DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
+    const dashboardShell = {
+        ...empty,
+        heartbeatTimeoutSeconds
+    };
+    const endpoints = (Array.isArray(payload?.endpoints) ? payload.endpoints : []).map(endpoint => ({
+        ...endpoint,
+        status: computeEDREndpointStatus(endpoint, dashboardShell)
+    }));
+    const events = Array.isArray(payload?.events) ? payload.events : [];
+    const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+    const responses = Array.isArray(payload?.responses) ? payload.responses : [];
+
+    return {
+        summary: {
+            ...empty.summary,
+            ...(payload.summary || {}),
+            totalEndpoints: Number(payload?.summary?.totalEndpoints ?? endpoints.length),
+            onlineEndpoints: endpoints.filter(endpoint => endpoint.status === 'online').length,
+            offlineEndpoints: endpoints.filter(endpoint => endpoint.status !== 'online').length,
+            openAlerts: Number(payload?.summary?.openAlerts ?? alerts.filter(alert => (alert.status || 'open') === 'open').length),
+            criticalAlerts: Number(payload?.summary?.criticalAlerts ?? alerts.filter(alert => alert.severity === 'critical').length),
+            eventsToday: Number(payload?.summary?.eventsToday ?? events.length),
+            responses: Number(payload?.summary?.responses ?? responses.length)
+        },
+        endpoints,
+        events,
+        alerts,
+        responses,
+        heartbeatTimeoutSeconds,
+        coverage: Array.isArray(payload?.coverage) ? payload.coverage : []
+    };
+}
+
+async function loadEDRDashboardFromBackend(notifyOnError = true, options = {}) {
+    if (isLoadingEDRDashboard) {
+        return;
+    }
+
+    isLoadingEDRDashboard = true;
+    const showLoading = options.showLoading !== false;
+    if (showLoading) {
+        setEDRRefreshState(true);
+    }
+
+    try {
+        const cacheBuster = options.force ? `?ts=${Date.now()}` : '';
+        const response = await fetchWithTimeout(`${API_ENDPOINTS.edrDashboard}${cacheBuster}`, {
+            cache: 'no-store'
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP Error: ${response.status}`);
+        }
+
+        const payload = await response.json();
+        edrDashboardData = normalizeEDRDashboardPayload(payload);
+        renderEDRDashboard();
+        if (notifyOnError) {
+            showToast('EDR events refreshed', 'success', 1600);
+        }
+    } catch (error) {
+        console.error('Failed to load EDR dashboard:', error);
+        renderEDRDashboard();
+        if (notifyOnError) {
+            const message = error.name === 'AbortError'
+                ? 'EDR dashboard refresh timed out. Check backend server.'
+                : `Failed to load EDR data: ${error.message}`;
+            showToast(message, 'error');
+        }
+    } finally {
+        isLoadingEDRDashboard = false;
+        if (showLoading) {
+            setEDRRefreshState(false);
+        }
+    }
+}
+
+function getEDRSearchQuery() {
+    const input = document.getElementById('edrSearch');
+    return (input?.value || '').trim().toLowerCase();
+}
+
+function getEDRFilter() {
+    const select = document.getElementById('edrFilter');
+    return select?.value || 'all';
+}
+
+function matchesEDRSearch(item, query) {
+    if (!query) return true;
+    return [
+        item.hostname,
+        item.endpoint_name,
+        item.ip_address,
+        item.user,
+        item.process,
+        item.process_name,
+        item.parent_process,
+        item.child_process,
+        item.title,
+        item.summary,
+        item.command_line,
+        item.destination_ip,
+        item.file_path,
+        item.registry_key,
+        item.task_name,
+        item.signature_status,
+        item.signature_subject,
+        item.usb_action,
+        item.device_name,
+        item.device_id,
+        item.rdp_result,
+        item.target_user,
+        item.source_ip,
+        item.failed_count,
+        item.mitre_id,
+        item.status
+    ].some(value => String(value || '').toLowerCase().includes(query));
+}
+
+function getFilteredEDRData() {
+    const query = getEDRSearchQuery();
+    const filter = getEDRFilter();
+    const endpoints = (edrDashboardData.endpoints || []).filter(endpoint => matchesEDRSearch(endpoint, query));
+    let alerts = (edrDashboardData.alerts || []).filter(alert => matchesEDRSearch(alert, query));
+    let events = (edrDashboardData.events || []).filter(event => matchesEDRSearch(event, query));
+    const responses = (edrDashboardData.responses || []).filter(response => matchesEDRSearch(response, query));
+
+    if (filter === 'critical') {
+        alerts = alerts.filter(alert => String(alert.severity || '').toLowerCase() === 'critical');
+    } else if (['process', 'network', 'file', 'usb', 'rdp_login', 'failed_login_burst'].includes(filter)) {
+        events = events.filter(event => String(event.event_type || '').toLowerCase() === filter);
+    }
+
+    return { endpoints, alerts, events, responses };
+}
+
+function renderEDRDashboard() {
+    if (!document.getElementById('edrDashboard')) return;
+
+    refreshLocalEDRLiveness();
+    const filtered = getFilteredEDRData();
+    renderEDRSummary();
+    renderEDREndpoints(filtered.endpoints);
+    renderEDRAlerts(filtered.alerts);
+    renderEDREvents(filtered.events);
+    renderEDRProcessContext(filtered.alerts, filtered.events);
+    renderEDRResponses(filtered.responses);
+}
+
+function renderEDRSummary() {
+    const summary = edrDashboardData.summary || {};
+    const online = Number(summary.onlineEndpoints || 0);
+    const total = Number(summary.totalEndpoints || 0);
+    setTextContent('edrEndpointsOnline', `${online}/${total}`);
+    setTextContent('edrOpenAlerts', Number(summary.openAlerts || 0).toLocaleString());
+    setTextContent('edrCriticalAlerts', Number(summary.criticalAlerts || 0).toLocaleString());
+    setTextContent('edrEventsToday', Number(summary.eventsToday || 0).toLocaleString());
+}
+
+function setTextContent(id, value) {
+    const element = document.getElementById(id);
+    if (element) {
+        element.textContent = value;
+    }
+}
+
+function formatRelativeTime(value) {
+    if (!value) return 'Unknown';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    const diffSeconds = Math.max(0, Math.round((Date.now() - parsed.getTime()) / 1000));
+    if (diffSeconds < 10) return 'Just now';
+    if (diffSeconds < 60) return `${diffSeconds}s ago`;
+    const diffMinutes = Math.round(diffSeconds / 60);
+    if (diffMinutes < 60) return `${diffMinutes}m ago`;
+    const diffHours = Math.round(diffMinutes / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return parsed.toLocaleString();
+}
+
+function normalizeClassToken(value, fallback = 'unknown') {
+    return String(value || fallback).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+}
+
+function renderEDREndpoints(endpoints) {
+    const tbody = document.getElementById('edrEndpointsBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (!endpoints.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="edr-empty-state">No endpoint telemetry available</td></tr>';
+        return;
+    }
+
+    endpoints.forEach(endpoint => {
+        const status = normalizeClassToken(endpoint.status || 'offline');
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${escapeHtml(endpoint.hostname || endpoint.endpoint_id || 'Unknown')}</strong></td>
+            <td><code>${escapeHtml(endpoint.ip_address || 'N/A')}</code></td>
+            <td>${escapeHtml(endpoint.user || 'N/A')}</td>
+            <td>${escapeHtml(endpoint.agent_version || 'N/A')}</td>
+            <td><span class="edr-status ${status}">${escapeHtml(endpoint.status || 'offline')}</span></td>
+            <td>${escapeHtml(formatRelativeTime(endpoint.last_seen))}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderEDRAlerts(alerts) {
+    const container = document.getElementById('edrAlertsQueue');
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!alerts.length) {
+        container.innerHTML = '<div class="edr-empty-state">No endpoint alerts in queue</div>';
+        return;
+    }
+
+    alerts.slice(0, 8).forEach(alert => {
+        const severity = normalizeClassToken(alert.severity || 'medium');
+        const item = document.createElement('div');
+        item.className = `edr-alert-item ${severity}`;
+        item.innerHTML = `
+            <div class="edr-alert-top">
+                <div class="edr-alert-title">${escapeHtml(alert.title || 'Endpoint Alert')}</div>
+                <span class="edr-severity ${severity}">${escapeHtml(alert.severity || 'medium')}</span>
+            </div>
+            <div class="edr-alert-meta">
+                <div>${escapeHtml(alert.endpoint_name || alert.endpoint_id || 'Unknown Endpoint')} | ${escapeHtml(alert.user || 'Unknown User')}</div>
+                <div>Process: <code>${escapeHtml(alert.process || alert.process_name || 'N/A')}</code></div>
+                ${alert.destination_ip ? `<div>Destination: <code>${escapeHtml(alert.destination_ip)}${alert.destination_port ? `:${escapeHtml(alert.destination_port)}` : ''}</code></div>` : ''}
+                ${alert.mitre_id ? `<div>MITRE: ${escapeHtml(alert.mitre_id)}</div>` : ''}
+                <div>${escapeHtml(formatRelativeTime(alert.timestamp))}</div>
+            </div>
+            <div class="edr-alert-actions">
+                <button class="btn-action btn-details" type="button" data-action="details">
+                    <i class="fas fa-expand"></i> Details
+                </button>
+                <button class="btn-action btn-block" type="button" data-action="kill">
+                    <i class="fas fa-skull-crossbones"></i> Kill
+                </button>
+                ${alert.destination_ip ? `
+                    <button class="btn-action btn-details" type="button" data-action="block">
+                        <i class="fas fa-ban"></i> Block IP
+                    </button>
+                ` : ''}
+            </div>
+        `;
+
+        item.querySelector('[data-action="details"]').addEventListener('click', () => showEDRAlertDetails(alert.id || alert.alert_id));
+        item.querySelector('[data-action="kill"]').addEventListener('click', () => submitEDRResponse('kill_process', alert.process || alert.process_name || 'unknown-process', alert));
+        const blockButton = item.querySelector('[data-action="block"]');
+        if (blockButton) {
+            blockButton.addEventListener('click', () => submitEDRResponse('block_ip', alert.destination_ip, alert));
+        }
+        container.appendChild(item);
+    });
+}
+
+function renderEDREvents(events) {
+    const tbody = document.getElementById('edrEventsBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (!events.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="edr-empty-state">No endpoint events found</td></tr>';
+        return;
+    }
+
+    events.slice(0, 50).forEach(event => {
+        const eventType = normalizeClassToken(event.event_type || 'event');
+        const target = getEDREventTarget(event);
+        const row = document.createElement('tr');
+        row.className = 'edr-clickable-row';
+        row.tabIndex = 0;
+        row.title = 'Open event details';
+        row.innerHTML = `
+            <td>${escapeHtml(formatRelativeTime(event.timestamp))}</td>
+            <td>${escapeHtml(event.endpoint_name || event.endpoint_id || 'Unknown')}</td>
+            <td><span class="edr-event-type ${eventType}">${escapeHtml(event.event_type || 'event')}</span></td>
+            <td><code>${escapeHtml(event.process_name || 'N/A')}</code></td>
+            <td>${target}</td>
+        `;
+        row.addEventListener('click', () => showEDREventDetails(event.id || event.event_id));
+        row.addEventListener('keydown', (keyboardEvent) => {
+            if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+                keyboardEvent.preventDefault();
+                showEDREventDetails(event.id || event.event_id);
+            }
+        });
+        tbody.appendChild(row);
+    });
+}
+
+function getEDREventTarget(event) {
+    if (event.destination_ip) {
+        return `<code>${escapeHtml(event.destination_ip)}${event.destination_port ? `:${escapeHtml(event.destination_port)}` : ''}</code>`;
+    }
+    if (event.event_type === 'usb') {
+        return `${escapeHtml(event.usb_action || 'USB')} <code>${escapeHtml(event.device_name || event.device_id || 'USB device')}</code>`;
+    }
+    if (event.event_type === 'rdp_login') {
+        return `${escapeHtml(event.rdp_result || 'RDP')} ${escapeHtml(event.target_user || 'unknown user')} from <code>${escapeHtml(event.source_ip || 'unknown source')}</code>`;
+    }
+    if (event.event_type === 'failed_login_burst') {
+        return `${escapeHtml(event.failed_count || 0)} failed logins for ${escapeHtml(event.target_user || 'unknown user')} from <code>${escapeHtml(event.source_ip || 'unknown source')}</code>`;
+    }
+    if (event.file_path) {
+        return `<code>${escapeHtml(event.file_path)}</code>`;
+    }
+    if (event.registry_key) {
+        return `<code>${escapeHtml(event.registry_key)}</code>`;
+    }
+    if (event.task_name) {
+        return escapeHtml(event.task_name);
+    }
+    if (event.command_line) {
+        return `<span class="edr-command-line">${escapeHtml(event.command_line)}</span>`;
+    }
+    return 'N/A';
+}
+
+function getEDREventById(eventId) {
+    return (edrDashboardData.events || []).find(event =>
+        String(event.id || event.event_id) === String(eventId)
+    );
+}
+
+function renderEDRDetailRow(label, value, options = {}) {
+    const displayValue = value === undefined || value === null || value === '' ? 'N/A' : value;
+    const content = options.code
+        ? `<code>${escapeHtml(displayValue)}</code>`
+        : escapeHtml(displayValue);
+    return `
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">${escapeHtml(label)}</span>
+            <span class="modal-detail-value">${content}</span>
+        </div>
+    `;
+}
+
+function showEDREventDetails(eventId) {
+    const event = getEDREventById(eventId);
+    if (!event) {
+        showToast('EDR event details not found', 'error');
+        return;
+    }
+
+    const modal = document.getElementById('detailModal');
+    const modalBody = document.getElementById('modalBody');
+    const modalTitle = modal.querySelector('.modal-header h2');
+    const responseBtn = document.getElementById('modalBlockBtn');
+
+    if (modalTitle) {
+        modalTitle.textContent = 'EDR Event Details';
+    }
+
+    const rows = [
+        renderEDRDetailRow('Event ID', event.id || event.event_id, { code: true }),
+        renderEDRDetailRow('Type', event.event_type),
+        renderEDRDetailRow('Endpoint', event.endpoint_name || event.endpoint_id),
+        renderEDRDetailRow('User', event.user),
+        renderEDRDetailRow('Time', event.timestamp),
+        renderEDRDetailRow('Process', event.process_name, { code: true }),
+        renderEDRDetailRow('PID', event.pid),
+        renderEDRDetailRow('Parent Process', event.parent_process, { code: true }),
+        renderEDRDetailRow('Command Line', event.command_line, { code: true }),
+        renderEDRDetailRow('Image Path', event.image_path, { code: true }),
+        renderEDRDetailRow('Destination', event.destination_ip ? `${event.destination_ip}${event.destination_port ? `:${event.destination_port}` : ''}` : '', { code: true }),
+        renderEDRDetailRow('File Path', event.file_path, { code: true }),
+        renderEDRDetailRow('Registry Key', event.registry_key, { code: true }),
+        renderEDRDetailRow('Signature', event.signature_status),
+        renderEDRDetailRow('Target User', event.target_user),
+        renderEDRDetailRow('Source IP', event.source_ip, { code: true }),
+        renderEDRDetailRow('Failed Count', event.failed_count),
+        renderEDRDetailRow('Window', event.window_start || event.window_end ? `${event.window_start || 'N/A'} to ${event.window_end || 'N/A'}` : ''),
+    ].join('');
+
+    modalBody.innerHTML = `
+        ${rows}
+        <div class="log-section">
+            <h4>Raw Event</h4>
+            <pre class="log-pre">${escapeHtml(JSON.stringify(event.raw || event, null, 2))}</pre>
+        </div>
+    `;
+
+    responseBtn.textContent = 'Collect Details';
+    responseBtn.disabled = false;
+    responseBtn.onclick = () => {
+        submitEDRResponse('collect_process_details', event.process_name || event.endpoint_name || event.endpoint_id || 'endpoint', event);
+        modal.classList.add('hidden');
+    };
+
+    modal.classList.remove('hidden');
+}
+
+function renderEDRProcessContext(alerts, events) {
+    const container = document.getElementById('edrProcessTree');
+    if (!container) return;
+    const alert = alerts[0] || (edrDashboardData.alerts || [])[0];
+    const event = events.find(item => item.event_type === 'process') || (edrDashboardData.events || []).find(item => item.event_type === 'process');
+
+    if (!alert && !event) {
+        container.innerHTML = '<div class="edr-empty-state">No process context available</div>';
+        return;
+    }
+
+    const parentProcess = alert?.parent_process || event?.parent_process || 'parent.exe';
+    const childProcess = alert?.child_process || alert?.process || event?.process_name || 'process.exe';
+    const commandLine = alert?.command_line || event?.command_line || '';
+    const destination = alert?.destination_ip
+        ? `${alert.destination_ip}${alert.destination_port ? `:${alert.destination_port}` : ''}`
+        : '';
+
+    container.innerHTML = `
+        <div class="edr-tree-node">
+            <strong>Parent Process</strong>
+            <div><code>${escapeHtml(parentProcess || 'N/A')}</code></div>
+        </div>
+        <div class="edr-tree-node child">
+            <strong>Child Process</strong>
+            <div><code>${escapeHtml(childProcess || 'N/A')}</code></div>
+            ${commandLine ? `<div class="edr-command-line">${escapeHtml(commandLine)}</div>` : ''}
+        </div>
+        ${destination ? `
+            <div class="edr-tree-node child">
+                <strong>Network Connection</strong>
+                <div><code>${escapeHtml(destination)}</code></div>
+            </div>
+        ` : ''}
+    `;
+}
+
+function renderEDRResponses(responses) {
+    const tbody = document.getElementById('edrResponsesBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (!responses.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="edr-empty-state">No response actions recorded</td></tr>';
+        return;
+    }
+
+    responses.slice(0, 8).forEach(response => {
+        const mode = normalizeClassToken(response.mode || 'dry-run');
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${escapeHtml(formatEDRAction(response.action || response.action_type))}</td>
+            <td><code>${escapeHtml(response.target || 'N/A')}</code></td>
+            <td><span class="edr-mode ${mode}">${escapeHtml(response.mode || 'dry-run')}</span></td>
+            <td>${escapeHtml(response.status || 'unknown')}</td>
+            <td>${escapeHtml(formatRelativeTime(response.timestamp))}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function formatEDRAction(action) {
+    return String(action || 'response')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function getEDRAlertById(alertId) {
+    return (edrDashboardData.alerts || []).find(alert =>
+        String(alert.id || alert.alert_id) === String(alertId)
+    );
+}
+
+function showEDRAlertDetails(alertId) {
+    const alert = getEDRAlertById(alertId);
+    if (!alert) {
+        showToast('EDR alert details not found', 'error');
+        return;
+    }
+
+    const modal = document.getElementById('detailModal');
+    const modalBody = document.getElementById('modalBody');
+    const modalTitle = modal.querySelector('.modal-header h2');
+    const responseBtn = document.getElementById('modalBlockBtn');
+    const relatedEvents = (edrDashboardData.events || []).filter(event =>
+        (alert.related_event_ids || []).map(String).includes(String(event.id || event.event_id))
+    );
+
+    if (modalTitle) {
+        modalTitle.textContent = 'EDR Alert Details';
+    }
+
+    modalBody.innerHTML = `
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Alert</span>
+            <span class="modal-detail-value">${escapeHtml(alert.title || 'Endpoint Alert')}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Severity</span>
+            <span class="modal-detail-value" style="text-transform: uppercase; color: ${getThreatColor(alert.severity)}">${escapeHtml(alert.severity || 'medium')}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Endpoint</span>
+            <span class="modal-detail-value">${escapeHtml(alert.endpoint_name || alert.endpoint_id || 'Unknown')}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">User</span>
+            <span class="modal-detail-value">${escapeHtml(alert.user || 'Unknown')}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Parent Process</span>
+            <span class="modal-detail-value"><code>${escapeHtml(alert.parent_process || 'N/A')}</code></span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Child Process</span>
+            <span class="modal-detail-value"><code>${escapeHtml(alert.child_process || alert.process || 'N/A')}</code></span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Command Line</span>
+            <span class="modal-detail-value"><code>${escapeHtml(alert.command_line || 'N/A')}</code></span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Destination IP</span>
+            <span class="modal-detail-value"><code>${escapeHtml(alert.destination_ip || 'N/A')}</code></span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">MITRE</span>
+            <span class="modal-detail-value">${escapeHtml(alert.mitre_id || 'N/A')}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Summary</span>
+            <span class="modal-detail-value">${escapeHtml(alert.summary || 'No summary available')}</span>
+        </div>
+        <div class="modal-detail-row">
+            <span class="modal-detail-label">Recommended Action</span>
+            <span class="modal-detail-value">${escapeHtml(alert.recommended_action || 'Collect process details')}</span>
+        </div>
+        <div class="log-section">
+            <h4>Related Events</h4>
+            <pre class="log-pre">${escapeHtml(JSON.stringify(relatedEvents.slice(0, 5), null, 2))}</pre>
+        </div>
+    `;
+
+    responseBtn.textContent = 'Collect Details';
+    responseBtn.disabled = false;
+    responseBtn.onclick = () => {
+        submitEDRResponse('collect_process_details', alert.process || alert.process_name || alert.endpoint_name || 'endpoint', alert);
+        modal.classList.add('hidden');
+    };
+
+    modal.classList.remove('hidden');
+}
+
+async function submitEDRResponse(action, target, alert = {}) {
+    if (!target) {
+        showToast('Response target is missing', 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch(API_ENDPOINTS.edrResponse, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action,
+                target,
+                dry_run: true,
+                endpoint_id: alert.endpoint_id || '',
+                alert_id: alert.id || alert.alert_id || '',
+                actor: 'dashboard'
+            })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            throw new Error(payload.error || payload.message || `HTTP Error: ${response.status}`);
+        }
+
+        showToast(payload.message || 'EDR response recorded', 'success');
+        await loadEDRDashboardFromBackend(false);
+    } catch (error) {
+        console.error('EDR response failed:', error);
+        showToast(`EDR response failed: ${error.message}`, 'error');
+    }
 }
 
 // ========== CHARTS INITIALIZATION ==========
@@ -2010,7 +2642,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 100);
 
-    console.log('Threat Intelligence Dashboard initialized successfully');
 });
 
 // ========== PLACEHOLDER API HOOKS ==========
@@ -2069,5 +2700,9 @@ window.THREAT_DASHBOARD = {
     backend: {
         url: BACKEND_URL,
         endpoints: API_ENDPOINTS
+    },
+    edr: {
+        refresh: loadEDRDashboardFromBackend,
+        respond: submitEDRResponse
     }
 };

@@ -116,34 +116,125 @@
                 </div>
             </div>
 
-            <!-- Live Threat Table -->
-            <div class="table-section">
-                <div class="table-header">
-                    <h2>Live Malicious IP Activity</h2>
+            <!-- EDR Dashboard -->
+            <div class="edr-dashboard-section" id="edrDashboard">
+                <div class="edr-dashboard-header">
+                    <div>
+                        <h2>Endpoint Detection & Response</h2>
+                        <p>Windows endpoint telemetry, alert queue, and safe response actions</p>
+                    </div>
                     <div class="table-controls">
-                        <input type="text" id="ipSearch" placeholder="Search IP..." class="search-input">
-                        <button class="btn-refresh" id="refreshBtn">
+                        <input type="text" id="edrSearch" placeholder="Search endpoint, process, alert..." class="search-input">
+                        <select id="edrFilter" class="form-control">
+                            <option value="all">All Telemetry</option>
+                            <option value="critical">Critical Alerts</option>
+                            <option value="process">Process Events</option>
+                            <option value="network">Network Events</option>
+                            <option value="file">File Events</option>
+                            <option value="usb">USB Events</option>
+                            <option value="rdp_login">RDP Events</option>
+                            <option value="failed_login_burst">Failed Login Bursts</option>
+                        </select>
+                        <button class="btn-refresh" id="edrRefreshBtn" type="button">
                             <i class="fas fa-sync"></i> Refresh
                         </button>
                     </div>
                 </div>
-                <div class="table-wrapper">
-                    <table class="threat-table">
-                        <thead>
-                            <tr>
-                                <th>IP Address</th>
-                                <th>Country</th>
-                                <th>Threat Score</th>
-                                <th>Attack Type</th>
-                                <th>API Source</th>
-                                <th>Timestamp</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="threatTableBody">
-                            <!-- Populated by JavaScript -->
-                        </tbody>
-                    </table>
+
+                <div class="edr-summary-grid">
+                    <div class="edr-metric">
+                        <span class="edr-metric-label">Endpoints Online</span>
+                        <strong id="edrEndpointsOnline">0/0</strong>
+                    </div>
+                    <div class="edr-metric warning">
+                        <span class="edr-metric-label">Open Alerts</span>
+                        <strong id="edrOpenAlerts">0</strong>
+                    </div>
+                    <div class="edr-metric critical">
+                        <span class="edr-metric-label">Critical Alerts</span>
+                        <strong id="edrCriticalAlerts">0</strong>
+                    </div>
+                    <div class="edr-metric success">
+                        <span class="edr-metric-label">Events Today</span>
+                        <strong id="edrEventsToday">0</strong>
+                    </div>
+                </div>
+
+                <div class="edr-grid">
+                    <section class="edr-panel edr-endpoints-panel">
+                        <div class="edr-panel-header">
+                            <h3><i class="fas fa-laptop-code"></i> Endpoints</h3>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="edr-table">
+                                <thead>
+                                    <tr>
+                                        <th>Hostname</th>
+                                        <th>IP Address</th>
+                                        <th>User</th>
+                                        <th>Agent</th>
+                                        <th>Status</th>
+                                        <th>Last Seen</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="edrEndpointsBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="edr-panel edr-alerts-panel">
+                        <div class="edr-panel-header">
+                            <h3><i class="fas fa-triangle-exclamation"></i> Alert Queue</h3>
+                        </div>
+                        <div id="edrAlertsQueue" class="edr-alert-list"></div>
+                    </section>
+
+                    <section class="edr-panel edr-events-panel">
+                        <div class="edr-panel-header">
+                            <h3><i class="fas fa-stream"></i> Events</h3>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="edr-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Endpoint</th>
+                                        <th>Type</th>
+                                        <th>Process</th>
+                                        <th>Target</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="edrEventsBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="edr-panel edr-process-panel">
+                        <div class="edr-panel-header">
+                            <h3><i class="fas fa-code-branch"></i> Process Context</h3>
+                        </div>
+                        <div id="edrProcessTree" class="edr-process-tree"></div>
+                    </section>
+
+                    <section class="edr-panel edr-response-panel">
+                        <div class="edr-panel-header">
+                            <h3><i class="fas fa-shield-halved"></i> Response History</h3>
+                        </div>
+                        <div class="table-wrapper">
+                            <table class="edr-table">
+                                <thead>
+                                    <tr>
+                                        <th>Action</th>
+                                        <th>Target</th>
+                                        <th>Mode</th>
+                                        <th>Status</th>
+                                        <th>Time</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="edrResponsesBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
                 </div>
             </div>
         </section>
