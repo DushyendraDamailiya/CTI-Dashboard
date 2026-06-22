@@ -1,8 +1,8 @@
-# Threat Intelligence and EDR Dashboard
+# Threat Intelligence and Response Dashboard
 
 ## Project Introduction
 
-This project is a cybersecurity dashboard for detecting, viewing, and responding to suspicious IP activity.
+This project is a local cybersecurity dashboard for detecting, viewing, and responding to suspicious IP activity.
 
 It watches log files for attack-like behavior, creates real-time alerts, sends those alerts to a Flask backend, and shows everything inside a browser dashboard. The dashboard also includes charts, alert details, threat logs, a global map, IP blocking, and an important Windows endpoint/EDR monitoring module.
 
@@ -18,24 +18,7 @@ Use it only in systems and networks where you have permission.
 
 In our lab demonstration, Kali Linux is used as the attacker machine and Windows is used as the target/monitored machine. We perform controlled and authorized test attacks from Kali Linux to Windows. The Windows system records the activity in logs, `attack_detector.py` detects the suspicious patterns, and the dashboard generates real-time attack and threat alerts with further details for investigation.
 
-<img width="1919" height="910" alt="Screenshot 2026-05-23 150655" src="https://github.com/user-attachments/assets/ccb86e94-1305-4623-bc74-77abac65f4f7" />
-
-<img width="1919" height="1079" alt="5" src="https://github.com/user-attachments/assets/0b792f4c-e8b1-4922-935c-a07c0d3ce584" />
-
-<img width="1919" height="1079" alt="4" src="https://github.com/user-attachments/assets/1542366e-df42-4951-a0b7-6feb46a43c9a" />
-
-<img width="1679" height="1042" alt="8" src="https://github.com/user-attachments/assets/ab09628a-2bcb-4a44-bb2e-3d8432a0d8bf" />
-<img width="1874" height="1040" alt="9" src="https://github.com/user-attachments/assets/1c90a20f-2f05-48b9-8a72-c7a0c331b736" />
-
-<img width="1870" height="1051" alt="7" src="https://github.com/user-attachments/assets/e4767c11-b707-4f05-a4f5-6c907ece3c21" />
-
-<img width="1919" height="1079" alt="3" src="https://github.com/user-attachments/assets/3d72d65c-6604-44d2-b4ff-92d73fd97a63" />
-
-<img width="1919" height="1079" alt="1" src="https://github.com/user-attachments/assets/80783c64-b3f4-4810-87b2-da1c011bd882" />
-
-<img width="1919" height="1079" alt="2" src="https://github.com/user-attachments/assets/93e0c097-43be-4d16-bcf2-a23661a0b3f7" />
-
-## Table of Contents
+In our lab demonstration, Kali Linux is used as the attacker machine and Windows is used as the target/monitored machine. We perform controlled and authorized test attacks from Kali Linux to Windows. The Windows system records the activity in logs, `attack_detector.py` detects the suspicious patterns, and the dashboard generates real-time attack and threat alerts with further details for investigation.
 
 - [Main Features](#main-features)
 - [How the Project Works](#how-the-project-works)
