@@ -1,63 +1,33 @@
 # Threat Intelligence and EDR Dashboard
 
-A local security dashboard for malicious IP intelligence, real-time alert tracking, and basic Windows endpoint telemetry.
+## Project Introduction
 
-The project has three main parts:
+This project is a cybersecurity dashboard for detecting, viewing, and responding to suspicious IP activity.
 
-- A Flask backend API on `http://localhost:5001`
-- A browser dashboard served from `http://localhost:8000`
-- Optional collectors:
-  - `attack_detector.py` for log-based attack alerts
-  - `windows_endpoint_agent.py` for Windows EDR telemetry
+It watches log files for attack-like behavior, creates real-time alerts, sends those alerts to a Flask backend, and shows everything inside a browser dashboard. The dashboard also includes charts, alert details, threat logs, a global map, IP blocking, and an important Windows endpoint/EDR monitoring module.
 
-## Features
+The main goal of this project is simple:
 
-- Manual scan for IPs, domains, and file hashes
-- Threat intelligence lookups through configured APIs
-- Real-time alert storage and alert stats
-- Global map and threat logs
-- IP block/unblock API with optional firewall support
-- EDR dashboard on the front page
-- Windows endpoint heartbeat and online/offline status
-- EDR process, network, file, registry, scheduled task, USB, RDP, and failed-login telemetry
-- EDR alert queue with clickable details
-- Safe dry-run EDR response actions
-# Threat Intelligence and Response Framework for Malicious IPs Dashboard
+```text
+Detect suspicious activity -> Generate alerts -> Show alerts on dashboard -> Help the user investigate and respond
+```
 
-A real-time alert generation, monitoring, investigation, and response dashboard for malicious IP activity. The project combines a browser dashboard, a Flask backend, a log-based attack detector, optional MySQL persistence, map-based attack visualization, and response actions such as app-level and firewall-level IP blocking.
+This project is useful for cybersecurity learning, college projects, SOC-style demos, lab testing, and understanding how threat monitoring systems work.
 
-The main purpose of this project is real-time attack detection and alert generation. Manual threat-intelligence provider lookups are included only as a secondary investigation feature for analysts who want extra reputation context after an alert or during manual review.
+Use it only in systems and networks where you have permission.
 
-## Table of Contents
+In our lab demonstration, Kali Linux is used as the attacker machine and Windows is used as the target/monitored machine. We perform controlled and authorized test attacks from Kali Linux to Windows. The Windows system records the activity in logs, `attack_detector.py` detects the suspicious patterns, and the dashboard generates real-time attack and threat alerts with further details for investigation.
 
-- [Overview](#overview)
-- [Core Features](#core-features)
-- [Architecture](#architecture)
-- [Technology Stack](#technology-stack)
-- [Project Structure](#project-structure)
-- [Runtime Flow](#runtime-flow)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Environment Configuration](#environment-configuration)
-- [MySQL Setup](#mysql-setup)
-- [Running the Project](#running-the-project)
-- [Attack Detector](#attack-detector)
-- [Dashboard Features](#dashboard-features)
-- [Manual Scan Enrichment](#manual-scan-enrichment)
-- [Backend Endpoint Reference](#backend-endpoint-reference)
-- [Database Schema](#database-schema)
-- [IP Blocking](#ip-blocking)
-- [Testing Real-Time Alerts](#testing-real-time-alerts)
-- [Firewall Blocking Setup](#firewall-blocking-setup)
-- [Security Notes](#security-notes)
-- [Troubleshooting](#troubleshooting)
-- [Verification Commands](#verification-commands)
-- [Future Improvements](#future-improvements)
 <img width="1919" height="910" alt="Screenshot 2026-05-23 150655" src="https://github.com/user-attachments/assets/ccb86e94-1305-4623-bc74-77abac65f4f7" />
 
 <img width="1919" height="1079" alt="5" src="https://github.com/user-attachments/assets/0b792f4c-e8b1-4922-935c-a07c0d3ce584" />
 
 <img width="1919" height="1079" alt="4" src="https://github.com/user-attachments/assets/1542366e-df42-4951-a0b7-6feb46a43c9a" />
+
+<img width="1679" height="1042" alt="8" src="https://github.com/user-attachments/assets/ab09628a-2bcb-4a44-bb2e-3d8432a0d8bf" />
+<img width="1874" height="1040" alt="9" src="https://github.com/user-attachments/assets/1c90a20f-2f05-48b9-8a72-c7a0c331b736" />
+
+<img width="1870" height="1051" alt="7" src="https://github.com/user-attachments/assets/e4767c11-b707-4f05-a4f5-6c907ece3c21" />
 
 <img width="1919" height="1079" alt="3" src="https://github.com/user-attachments/assets/3d72d65c-6604-44d2-b4ff-92d73fd97a63" />
 
@@ -65,74 +35,297 @@ The main purpose of this project is real-time attack detection and alert generat
 
 <img width="1919" height="1079" alt="2" src="https://github.com/user-attachments/assets/93e0c097-43be-4d16-bcf2-a23661a0b3f7" />
 
-## Overview
+## Table of Contents
 
-This project detects suspicious activity from logs, converts detections into structured alerts, sends alerts to a backend service, stores them when MySQL is enabled, and displays them in a live dashboard with charts, alert history, response controls, and map representation.
+- [Main Features](#main-features)
+- [How the Project Works](#how-the-project-works)
+- [Lab Demonstration Workflow](#lab-demonstration-workflow)
+- [Technology Used](#technology-used)
+- [Project Files](#project-files)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Environment Variables](#environment-variables)
+- [How to Run](#how-to-run)
+- [Testing Real-Time Alerts](#testing-real-time-alerts)
+- [Important Backend APIs](#important-backend-apis)
+- [Database Support](#database-support)
+- [Security Notes](#security-notes)
+- [Limitations](#limitations)
+- [Future Improvements](#future-improvements)
 
-It is designed for cybersecurity labs, academic demonstrations, SOC-style workflows, and learning how log monitoring, alert generation, visualization, investigation, and response systems fit together.
+## Main Features
 
-The primary workflow is:
+### 1. Real-Time Attack Detection
+
+The file `attack_detector.py` checks new log entries and looks for suspicious patterns.
+
+It can detect activity such as:
+
+- SSH root brute force attempts
+- SSH failed login attacks
+- Port scan indicators
+- Ping sweep indicators
+- Login flood patterns
+- DNS flood indicators
+- Beaconing-like repeated activity
+
+When a suspicious log line is found, the detector creates an alert and sends it to the backend.
+
+### 2. Real-Time Alert Generation
+
+The detector sends alerts to:
 
 ```text
-Kali/Linux Test Traffic
-  -> Target System Logs
+POST /api/receive-alert
+```
+
+Each alert can include:
+
+- Attack type
+- Attacker IP address
+- Target IP address
+- Severity level
+- Timestamp
+- Attempt count
+- Matched log line
+
+These alerts are then shown inside the dashboard.
+
+### 3. Live Dashboard
+
+The dashboard is opened in the browser using `index.html`.
+
+It shows:
+
+- Real-time threat monitoring
+- Alert cards
+- KPI counters
+- Charts
+- Threat activity tables
+- Search and filter options
+- Details modals
+- Response buttons
+
+The dashboard helps the user quickly understand what happened, which IP was involved, and how serious the alert is.
+
+### 4. Alerts Page
+
+The Alerts page shows security alerts received from the backend.
+
+It supports:
+
+- Severity filters
+- Search
+- Sorting
+- Alert details
+- Block IP action
+- Clear alerts action
+- CSV export
+- Printable PDF-style export
+
+### 5. Windows Endpoint / EDR Monitoring
+
+EDR monitoring is an important part of this project. The Windows endpoint agent collects system activity from the Windows machine and sends it to the backend:
+
+```text
+windows_endpoint_agent.py
+```
+
+This agent sends endpoint data to the backend and helps the dashboard show endpoint activity.
+
+It can collect:
+
+- Endpoint heartbeat
+- Process activity
+- Network connections
+- File activity
+- Registry Run key changes
+- Scheduled task changes
+- USB device activity
+- RDP login activity
+- Failed login bursts
+- Optional login events
+
+The dashboard shows endpoint status, EDR alerts, recent events, process context, and response history. This helps connect attack alerts with endpoint-level activity on the monitored Windows machine.
+
+### 6. Global Map View
+
+The Global Map page uses Leaflet.js to show threat locations on a map.
+
+It can display:
+
+- Country-based threat locations
+- Marker colors based on threat score
+- Scanned IP locations when geolocation is available
+- Basic map statistics
+
+This gives a visual idea of where suspicious activity may be coming from.
+
+### 7. Threat Logs
+
+The Threat Logs page stores and displays scan history.
+
+It supports:
+
+- Search by IP, country, or API source
+- Status filtering
+- Sorting by date or threat score
+- Pagination
+- Expandable details
+- CSV export
+- Printable PDF-style export
+
+If MySQL is enabled, this history can be stored permanently.
+
+### 8. IP Blocking and Unblocking
+
+The dashboard can block suspicious public IPv4 addresses.
+
+There are two blocking modes:
+
+- Application-level blocking: stores the blocked IP in backend memory.
+- Firewall-level blocking: tries to block the IP using the operating system firewall.
+
+Firewall blocking may require Administrator or sudo permission.
+
+Supported firewall methods:
+
+| System | Method |
+| --- | --- |
+| Windows | Windows Firewall using `netsh advfirewall` |
+| Linux | `iptables` |
+| macOS | `route` |
+
+For safety, private, local, reserved, and invalid IP addresses are rejected for scan and block actions.
+
+### 9. Optional MySQL Storage
+
+MySQL is optional.
+
+If MySQL is enabled, the backend can store:
+
+- Real-time alerts
+- Threat scan logs
+- Endpoint details
+- Endpoint events
+- EDR alerts
+- Response actions
+- IOC cache data
+- Cases and audit-style data
+
+If MySQL is disabled, the project can still run, but some data will only stay in memory while the backend is running.
+
+### 10. Search, Filters, Charts, and Exports
+
+The frontend includes useful investigation features:
+
+- Search boxes
+- Severity filters
+- Status filters
+- Sorting
+- Chart.js graphs
+- CSV exports
+- Printable report exports
+- Refresh buttons
+- Toast notifications
+
+These features make the dashboard easier to use during analysis.
+
+### 11. Manual Scan Using APIs
+
+Manual Scan is an additional investigation feature. It is not the main detection engine.
+
+The main detection engine is:
+
+```text
+attack_detector.py -> /api/receive-alert -> backend.py -> dashboard alerts
+```
+
+Manual Scan is used when the user wants to check an IP, domain, or file hash against external threat intelligence services.
+
+Supported scan targets:
+
+- Public IPv4 addresses
+- Domain names
+- MD5 hashes
+- SHA1 hashes
+- SHA256 hashes
+
+Supported external APIs:
+
+| API | Purpose |
+| --- | --- |
+| AbuseIPDB | Checks IP abuse reports and confidence score |
+| VirusTotal | Checks IP, domain, and hash reputation |
+| AlienVault OTX | Checks pulses, reputation, ASN, and country data |
+| GreyNoise | Checks whether an IP is related to internet scanning activity |
+| IPQualityScore | Checks fraud score, proxy, VPN, TOR, bot, and abuse indicators |
+
+API keys are configured in `.env`.
+
+If API keys are missing, the main real-time alert system still works. Only manual scan enrichment will have limited results.
+
+## How the Project Works
+
+The normal project flow is:
+
+```text
+Log activity
   -> attack_detector.py
-  -> Flask Backend /api/receive-alert
-  -> MySQL or Runtime Memory
-  -> Dashboard Alerts, Charts, Logs, Map Representation
-  -> Investigation and IP Blocking
+  -> Flask backend
+  -> MySQL or memory
+  -> Browser dashboard
+  -> Investigation and response
 ```
 
-## Core Features
-
-- Real-time log monitoring with `attack_detector.py`.
-- Detection of SSH brute force, root brute force, port scan, ping sweep, login flood, DNS flood indicators, and beaconing-like behavior.
-- Structured alert generation with attacker IP, target IP, severity, timestamp, log line, and attempt count.
-- Flask backend for alert ingestion, validation, persistence, statistics, dashboard data, and response actions.
-- Browser dashboard with monitoring, generated alerts, global map representation, threat logs, and manual investigation tabs.
-- Optional MySQL persistence for alerts and scan history.
-- Alert deduplication and severity escalation based on repeated attempts.
-- Global map visualization for geographic representation of detected or scanned threat sources.
-- Manual scan enrichment using external providers is secondary to the real-time alert workflow.
-- Public IPv4 validation for scan and block actions.
-- Optional alert-ingest token for detector-to-backend protection.
-- App-level blocklist and optional operating-system firewall blocking.
-- CSV and PDF-style export support from frontend tables.
-- CORS configuration through environment variables.
-- Graceful behavior when manual-scan provider keys or MySQL are disabled.
-
-## Architecture
+In a lab setup, the flow can look like this:
 
 ```text
-+----------------------+       +---------------------+
-| Authorized Test/Lab  |       | Monitored System    |
-| Traffic Generator    | ----> | Logs                |
-+----------------------+       +----------+----------+
-                                         |
-                                         v
-                              +----------+----------+
-                              | attack_detector.py |
-                              | Pattern Detection  |
-                              +----------+----------+
-                                         |
-                              POST /api/receive-alert
-                                         |
-                                         v
-                              +----------+----------+
-                              | backend.py          |
-                              | Flask Backend       |
-                              +----------+----------+
-                                         |
-                     +-------------------+-------------------+
-                     |                                       |
-                     v                                       v
-             +-------+--------+                      +-------+--------+
-             | MySQL Optional |                      | Browser UI     |
-             | alerts/logs    |                      | index.html     |
-             +----------------+                      +----------------+
+Kali Linux test traffic
+  -> Target system logs
+  -> attack_detector.py
+  -> POST /api/receive-alert
+  -> backend.py
+  -> Dashboard alerts
+  -> Block or investigate IP
 ```
 
-## Technology Stack
+## Lab Demonstration Workflow
+
+To show that the project is working in real time, it can be tested in a controlled lab using two machines:
+
+- Kali Linux as the attacker/test machine
+- Windows as the target and monitored machine
+
+From Kali Linux, different authorized test activities can be performed against the Windows machine. These activities create security-related log entries on the Windows side. The detector reads those logs, identifies attack or threat patterns, and sends alerts to the backend.
+
+The dashboard then shows:
+
+- Real-time attack alerts
+- Attacker IP address
+- Target IP address
+- Attack type
+- Severity level
+- Timestamp
+- Attempt count
+- Related log details
+- Further investigation and block options
+
+Example lab flow:
+
+```text
+Kali Linux attacker machine
+  -> Controlled test activity against Windows
+  -> Windows logs
+  -> attack_detector.py
+  -> Flask backend
+  -> Real-time dashboard alert
+  -> Alert details and response action
+```
+
+This lab setup proves that the dashboard is not only showing static data. It can receive real-time threat activity, generate alerts, and provide useful details for analysis.
+
+## Technology Used
 
 ### Frontend
 
@@ -157,138 +350,78 @@ Kali/Linux Test Traffic
 ### Database
 
 - MySQL, optional
-- Schema file: `mysql_schema.sql`
 
-## Project Structure
+## Project Files
 
 | File | Purpose |
-|------|---------|
-| `index.html` | Main dashboard UI. |
-| `style.css` | Dashboard styling, layout, dark theme, cards, tables, modals, and responsive rules. |
-| `script.js` | Frontend logic for navigation, generated alerts, charts, map representation, manual scans, logs, exports, and block actions. |
-| `backend.py` | Flask backend, alert receiver, alert storage, MySQL setup, dashboard endpoints, manual-scan enrichment proxy, validation, and blocking logic. |
-| `attack_detector.py` | Real-time log monitor and attack alert sender. |
-| `requirements.txt` | Python dependencies. |
-| `.env.example` | Example environment configuration. |
-| `mysql_schema.sql` | MySQL database schema. |
-| `SETUP_GUIDE.md` | Setup-focused documentation. |
-| `PROJECT_DESCRIPTION.md` | High-level project explanation. |
-| `setup-firewall-blocking.sh` | Linux helper script for firewall blocking setup. |
-| `test-firewall-blocking.py` | Firewall blocking capability test script. |
-| `start.sh` | Shell helper for Unix-like startup workflows. |
-| `diagram-1-ip-blocking-flow.mmd` | Mermaid diagram for IP blocking flow. |
-| `diagram-2-three-blocking-options.mmd` | Mermaid diagram for blocking options. |
-| `attack_detector.log` | Default local Windows test log file when present. |
-
-## Runtime Flow
-
-1. Start the Flask backend.
-2. Open the dashboard in a browser.
-3. Start the attack detector.
-4. The detector tails the configured log file.
-5. Suspicious log lines are matched against known attack patterns.
-6. The detector sends an alert to `POST /api/receive-alert`.
-7. The backend validates and stores the alert when MySQL is enabled.
-8. The dashboard fetches generated alerts, statistics, logs, and map data from the backend.
-9. Analysts review alert details, map representation, timeline, severity, and related log data.
-10. Analysts can optionally block suspicious public IPs.
-11. Manual scans can enrich IPs, domains, and hashes using external providers as a secondary feature.
+| --- | --- |
+| `index.html` | Main dashboard page |
+| `style.css` | Dashboard design and responsive styling |
+| `script.js` | Frontend logic, charts, map, alerts, scans, exports, and UI actions |
+| `backend.py` | Flask backend API, alert storage, scan logic, EDR APIs, and blocking logic |
+| `attack_detector.py` | Real-time log monitor and alert sender |
+| `windows_endpoint_agent.py` | Important Windows endpoint/EDR telemetry agent |
+| `mysql_schema.sql` | MySQL database schema |
+| `.env.example` | Example environment configuration |
+| `requirements.txt` | Python dependencies |
+| `setup-firewall-blocking.sh` | Linux/macOS helper for firewall blocking setup |
+| `test-firewall-blocking.py` | Firewall blocking test helper |
+| `start.sh` | Linux/macOS helper to start backend and frontend |
+| `diagram-1-ip-blocking-flow.mmd` | Mermaid diagram for IP blocking flow |
+| `diagram-2-three-blocking-options.mmd` | Mermaid diagram for blocking options |
 
 ## Requirements
 
 - Python 3.10 or newer
-- A modern browser
-- Optional: MySQL for persistent storage
-- Optional for Windows EDR: run PowerShell or VS Code as Administrator for best event-log access
-
-Install Python packages:
-
-```powershell
-pip install -r requirements.txt
-```
-
-## Configuration
-
-Create `.env` from the example file:
-
-```powershell
-copy .env.example .env
-```
-
-Then edit `.env` and add only the keys you use:
-
-```env
-ABUSEIPDB_KEY=
-VIRUSTOTAL_KEY=
-ALIENVAULT_KEY=
-GREYNOISE_KEY=
-IPQUALITYSCORE_KEY=
-
-MYSQL_ENABLED=false
-EDR_HEARTBEAT_TIMEOUT_SECONDS=20
-EDR_RESPONSE_DRY_RUN=true
-```
-
-MySQL is optional. If `MYSQL_ENABLED=false`, the app still runs with in-memory data.
-
-## Run The Project
-
-Open three terminals from the project folder.
-
-### 1. Backend
-
-```powershell
-python backend.py
-```
-
-Backend URL:
 - pip
 - A modern browser such as Chrome, Edge, or Firefox
-- MySQL Server, optional
-- Git, optional
-- Administrator or sudo privileges only if firewall-level blocking is required
+- MySQL, optional
+- Administrator or sudo permission only if firewall-level blocking is needed
+- Internet access for CDN assets and external API scans
 
-## Installation
+## Setup
 
-Clone or open the project folder, then install Python dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Using a virtual environment is recommended:
-
-```bash
-python -m venv venv
-```
+Create and activate a virtual environment.
 
 Windows PowerShell:
 
 ```powershell
+python -m venv venv
 .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 ```
 
 Linux/macOS:
 
 ```bash
+python3 -m venv venv
 source venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-## Environment Configuration
+Create your local environment file:
 
-Create a `.env` file in the project root using `.env.example` as the template.
+```powershell
+copy .env.example .env
+```
 
-Example:
+On Linux/macOS:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` based on your setup.
+
+## Environment Variables
+
+Common settings:
 
 ```env
-ABUSEIPDB_KEY=your_abuseipdb_key_here
-VIRUSTOTAL_KEY=your_virustotal_key_here
-ALIENVAULT_KEY=your_alienvault_key_here
-GREYNOISE_KEY=your_greynoise_key_here
-IPQUALITYSCORE_KEY=your_ipqualityscore_key_here
-
 MYSQL_ENABLED=false
 MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
@@ -298,38 +431,173 @@ MYSQL_DATABASE=threat_dashboard
 MYSQL_POOL_SIZE=5
 ALERT_DEDUP_WINDOW_MINUTES=10
 ALERT_INGEST_TOKEN=
-
-CORS_ORIGINS=http://localhost:5500,http://127.0.0.1:5500,http://localhost:5173,http://localhost:3000
 ```
 
-### Environment Variables
+Manual scan API keys:
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `ABUSEIPDB_KEY` | No | Provider key for optional AbuseIPDB manual-scan enrichment. |
-| `VIRUSTOTAL_KEY` | No | Provider key for optional VirusTotal manual-scan enrichment. |
-| `ALIENVAULT_KEY` | No | Provider key for optional AlienVault OTX manual-scan enrichment. |
-| `GREYNOISE_KEY` | No | Provider key for optional GreyNoise manual-scan enrichment. |
-| `IPQUALITYSCORE_KEY` | No | Provider key for optional IPQualityScore manual-scan enrichment. |
-| `MYSQL_ENABLED` | No | Set `true` to enable MySQL persistence. |
-| `MYSQL_HOST` | If MySQL enabled | MySQL host. |
-| `MYSQL_PORT` | If MySQL enabled | MySQL port. |
-| `MYSQL_USER` | If MySQL enabled | MySQL username. |
-| `MYSQL_PASSWORD` | If MySQL enabled | MySQL password. |
-| `MYSQL_DATABASE` | If MySQL enabled | Database name. |
-| `MYSQL_POOL_SIZE` | No | MySQL connection pool size. |
-| `ALERT_DEDUP_WINDOW_MINUTES` | No | Time window used to group repeated alerts. |
-| `ALERT_INGEST_TOKEN` | No | Optional shared token required by `/api/receive-alert`. |
-| `CORS_ORIGINS` | No | Comma-separated list of allowed browser origins. |
-| `ATTACK_BACKEND_URL` | No | Backend URL used by `attack_detector.py`. |
-| `ATTACK_LOG_FILE` | No | Log file monitored by `attack_detector.py`. |
-| `ATTACK_SCAN_INTERVAL` | No | Detector polling interval in seconds. |
+```env
+ABUSEIPDB_KEY=your_abuseipdb_key_here
+VIRUSTOTAL_KEY=your_virustotal_key_here
+ALIENVAULT_KEY=your_alienvault_key_here
+GREYNOISE_KEY=your_greynoise_key_here
+IPQUALITYSCORE_KEY=your_ipqualityscore_key_here
+```
 
-External provider keys are optional and are not required for real-time alert generation. Without those keys, the detector, alert receiver, alert dashboard, map view, and response workflow can still run; only manual scan enrichment will show provider-specific offline or missing-key responses.
+Windows endpoint agent settings:
 
-## MySQL Setup
+```env
+EDR_AGENT_TOKEN=
+EDR_HEARTBEAT_TIMEOUT_SECONDS=20
+EDR_RESPONSE_DRY_RUN=true
+EDR_AGENT_INTERVAL=2
+EDR_HEARTBEAT_INTERVAL=5
+EDR_SLOW_INTERVAL=30
+EDR_FAILED_LOGIN_THRESHOLD=5
+```
 
-MySQL is optional. If disabled, the backend still runs, but alerts and scan logs are not permanently stored.
+CORS settings:
+
+```env
+CORS_ORIGINS=http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000
+```
+
+## How to Run
+
+### 1. Start the Backend
+
+```bash
+python backend.py
+```
+
+Default backend URL:
+
+```text
+http://localhost:5001
+```
+
+Useful backend checks:
+
+```text
+http://localhost:5001/
+http://localhost:5001/health
+http://localhost:5001/api/status
+```
+
+### 2. Start the Frontend
+
+From the project folder:
+
+```bash
+python -m http.server 8000
+```
+
+Open:
+
+```text
+http://localhost:8000
+```
+
+You can also open `index.html` directly, but using a local server is usually smoother.
+
+### 3. Start the Real-Time Attack Detector
+
+In another terminal:
+
+```bash
+python attack_detector.py
+```
+
+Default log file:
+
+- Windows: `attack_detector.log`
+- Linux/macOS: `/var/log/syslog`
+
+To use a custom log file:
+
+Windows PowerShell:
+
+```powershell
+$env:ATTACK_LOG_FILE="C:\path\to\your.log"
+python attack_detector.py
+```
+
+Linux/macOS:
+
+```bash
+ATTACK_LOG_FILE=/path/to/your.log python attack_detector.py
+```
+
+### 4. Start the Windows Endpoint Agent for EDR Monitoring
+
+For best results, run the terminal as Administrator.
+
+```powershell
+python windows_endpoint_agent.py --backend http://localhost:5001 --include-login-events
+```
+
+To send only one collection cycle:
+
+```powershell
+python windows_endpoint_agent.py --backend http://localhost:5001 --once
+```
+
+### 5. Optional: Use the Startup Script
+
+On Linux/macOS:
+
+```bash
+bash start.sh
+```
+
+This starts the backend and a local frontend server.
+
+## Testing Real-Time Alerts
+
+Start the backend and the attack detector first.
+
+For local Windows-style testing, add this line to `attack_detector.log`:
+
+```text
+Failed password for root from 8.8.8.8 port 22 ssh2
+```
+
+Expected result:
+
+1. `attack_detector.py` detects the pattern.
+2. It sends an alert to `/api/receive-alert`.
+3. The backend stores the alert.
+4. The dashboard shows the alert on the Alerts page.
+
+For Linux lab testing, you can generate authorized test traffic that creates log entries in `/var/log/syslog` or your configured log file.
+
+## Important Backend APIs
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/` | GET | Backend service information |
+| `/health` | GET | Backend health check |
+| `/api/status` | GET | Backend, MySQL, API, and blocklist status |
+| `/api/validate` | POST | Validates IP, domain, or hash input |
+| `/api/receive-alert` | POST | Receives real-time alerts from `attack_detector.py` |
+| `/api/alerts` | GET | Returns stored alerts |
+| `/api/alerts` | DELETE | Clears stored alerts |
+| `/api/alert-stats` | GET | Returns chart statistics |
+| `/api/threat-logs` | GET | Returns manual scan history |
+| `/api/block-ip` | POST | Blocks a public IPv4 address |
+| `/api/unblock-ip` | POST | Unblocks an IP address |
+| `/api/blocked-ips` | GET | Lists blocked IPs |
+| `/api/edr/dashboard` | GET | Returns EDR dashboard data |
+| `/api/edr/heartbeat` | POST | Receives Windows agent heartbeat |
+| `/api/edr/ingest` | POST | Receives Windows endpoint events |
+| `/api/edr/events` | GET | Returns endpoint events |
+| `/api/edr/alerts` | GET | Returns EDR alerts |
+| `/api/edr/respond` | POST | Records EDR response actions |
+| `/api/scan` | POST | Runs manual scan using selected APIs |
+| `/api/scan/<service>` | POST | Runs one specific manual scan service |
+
+## Database Support
+
+MySQL is optional.
 
 To disable MySQL:
 
@@ -348,7 +616,7 @@ MYSQL_PASSWORD=your_mysql_password
 MYSQL_DATABASE=threat_dashboard
 ```
 
-The backend creates the database and required tables automatically on startup when MySQL is enabled.
+The backend can create the required database and tables automatically.
 
 You can also import the schema manually:
 
@@ -362,708 +630,40 @@ Windows PowerShell:
 Get-Content .\mysql_schema.sql | mysql -u root -p
 ```
 
-## Running the Project
-
-### 1. Start the Backend
-
-```bash
-python backend.py
-```
-
-Default backend address:
-
-```text
-http://localhost:5001
-```
-
-### 2. Frontend
-
-```powershell
-python -m http.server 8000
-```
-
-Open:
-
-```text
-http://localhost:8000
-```
-
-### 3. Windows EDR Agent
-
-For best results, run this terminal as Administrator:
-
-```powershell
-python windows_endpoint_agent.py --backend http://localhost:5001 --include-login-events
-```
-
-The agent should print heartbeat and event send messages:
-
-```text
-[heartbeat] status=200 ...
-[events] sent=... status=200 ...
-```
-
-If the agent stops, the dashboard should mark the endpoint offline after about 20 seconds.
-
-## EDR Dashboard
-
-The EDR dashboard is shown on the Real-Time Monitoring page.
-
-It shows:
-
-- Endpoints online/offline
-- Open and critical EDR alerts
-- Events today
-- Endpoint list
-- Alert queue
-- Recent endpoint events
-- Process context
-- Response history
-
-The EDR dashboard auto-refreshes every 5 seconds. The Refresh button also works manually. Event rows are clickable and open full details.
-
-Current EDR detections include:
-
-- Failed login bursts
-- Failed and successful RDP logins
-- USB insertion/removal
-- Suspicious PowerShell activity
-- Suspicious process paths
-- Unsigned or invalidly signed executables
-- Network connections to high-risk ports
-- Scheduled task persistence
-- Registry Run key persistence
-
-## Real-Time Attack Alerts
-
-Run the log-based detector in a separate terminal:
-
-```powershell
-python attack_detector.py
-```
-
-By default on Windows it reads:
-
-```text
-attack_detector.log
-```
-
-You can point it at another log file:
-
-```powershell
-$env:ATTACK_LOG_FILE="C:\path\to\your.log"
-python attack_detector.py
-```
-
-It sends alerts to:
-
-```text
-POST /api/receive-alert
-```
-
-## Firewall Blocking
-
-Application-level IP blocking works from the dashboard.
-
-System firewall blocking needs privileges:
-
-- Windows: run backend as Administrator
-- Linux/macOS: run `sudo bash setup-firewall-blocking.sh`
-
-Test firewall support:
-
-```powershell
-python test-firewall-blocking.py
-```
-
-## Useful Checks Before Commit
-
-```powershell
-python -m py_compile backend.py attack_detector.py windows_endpoint_agent.py test-firewall-blocking.py
-node --check script.js
-```
-
-Optional backend smoke test:
-
-```powershell
-$env:MYSQL_ENABLED="false"
-python -c "import backend; c=backend.app.test_client(); print(c.get('/health').status_code); print(c.get('/api/edr/dashboard').status_code)"
-```
-
-## Current Limitations
-
-- This is a local project, not a full enterprise EDR product.
-- The Windows agent runs while the terminal is open; it is not installed as a Windows service yet.
-- EDR response actions are dry-run by default.
-- Some Windows login/RDP events require Administrator privileges.
-- Browser charts and map libraries are loaded from CDN, so the dashboard needs internet access for those assets.
-
-Useful backend URLs:
-
-| URL | Purpose |
-|-----|---------|
-| `http://localhost:5001/` | Service metadata. |
-| `http://localhost:5001/health` | Health check. |
-| `http://localhost:5001/api/status` | Backend, MySQL, manual-scan provider, and blocklist status. |
-
-### 2. Open the Dashboard
-
-Open `index.html` in a browser.
-
-If your browser blocks local-file requests, serve the folder with a simple local server:
-
-```bash
-python -m http.server 5500
-```
-
-Then open:
-
-```text
-http://localhost:5500/index.html
-```
-
-### 3. Start the Attack Detector
-
-```bash
-python attack_detector.py
-```
-
-Default detector behavior:
-
-- Windows: monitors `attack_detector.log` in the project folder.
-- Linux/macOS: monitors `/var/log/syslog` unless overridden.
-
-Custom detector settings:
-
-```env
-ATTACK_LOG_FILE=attack_detector.log
-ATTACK_BACKEND_URL=http://localhost:5001
-ATTACK_SCAN_INTERVAL=2
-```
-
-If you set `ALERT_INGEST_TOKEN` in the backend `.env`, set the same value for the detector environment.
-
-## Attack Detector
-
-`attack_detector.py` is the main detection component.
-
-It reads only new log lines after each polling interval. It resets safely if the log file is rotated or truncated.
-
-Detected patterns include:
-
-| Attack Type | Example Pattern |
-|-------------|-----------------|
-| SSH root brute force | `Failed password for root from <ip>` |
-| SSH brute force | `Failed password for <user> from <ip>` |
-| Port scan | `UFW BLOCK` or `iptables BLOCK` with `SRC=<ip>` |
-| Ping sweep | `ICMP echo request` or `PROTO=ICMP` |
-| Login flood | Generic failed login/authentication patterns |
-| DNS flood indicator | Repeated DNS query log patterns |
-| Beaconing | Repeated activity from the same IP within a short window |
-
-The detector ignores local, private, reserved, loopback, and malformed IPs before sending alerts.
-
-Alert payload fields include:
-
-- `type`
-- `name`
-- `severity`
-- `attacker_ip`
-- `timestamp`
-- `target_ip`
-- `log_line`
-- `attempt_count`
-
-## Dashboard Features
-
-### Real-Time Monitoring
-
-Shows:
-
-- KPI cards
-- Live malicious IP activity
-- Search and refresh controls
-- Threat trend chart
-- Attack type distribution chart
-- Block and details actions
-
-### Manual Scan
-
-Manual scan is not the main detection engine. It is a secondary investigation tool that lets an analyst look up a suspicious public IP, domain, or hash after an alert is generated or during a separate manual review.
-
-Allows investigation of:
-
-- Public IPv4 addresses
-- Domain names
-- MD5, SHA1, and SHA256 hashes
-
-The frontend and backend reject private/reserved IP scans because manual provider lookups are intended for public routable IPs.
-
-### Global Map
-
-The map representation is an important dashboard view. It uses Leaflet to visualize where suspicious activity or enriched scan results are associated geographically.
-
-The map view helps show:
-
-- Approximate country or region of attack sources.
-- Marker colors based on threat level.
-- Previously scanned public IPs with available geolocation.
-- A quick visual summary of where suspicious activity is coming from.
-
-The map depends on available country/geolocation data. If no geolocation can be resolved, the alert still appears in the alert and log views.
-
-### Alerts
-
-Shows real-time alerts from the backend with:
-
-- Severity filtering
-- Search
-- Sorting
-- Critical alert banner
-- Details modal
-- Block action
-- CSV/PDF export
-- Clear alerts action
-
-### Threat Logs
-
-Shows stored manual scan history with:
-
-- Search
-- Status filtering
-- Date and score sorting
-- Pagination
-- Expandable details
-- CSV/PDF export
-
-## Manual Scan Enrichment
-
-Manual scan enrichment is a secondary feature. The real-time detection and alert-generation system does not depend on these external providers. They are used only to add reputation context when an analyst manually scans a public IP, domain, or hash.
-
-| Provider | Supported Targets | Notes |
-|----------|-------------------|-------|
-| AbuseIPDB | Public IPv4 | Abuse confidence, reports, ISP, usage type. |
-| VirusTotal | Public IPv4, domain, hash | Detection and reputation data. |
-| AlienVault OTX | Public IPv4, domain, hash | Pulses, reputation, ASN, country. |
-| GreyNoise | Public IPv4 | Internet scanner classification. |
-| IPQualityScore | Public IPv4 | Fraud score, VPN/proxy/TOR/bot/abuse indicators. |
-
-When a provider key is missing, the backend returns a safe offline response instead of crashing.
-
-## Backend Endpoint Reference
-
-Base URL:
-
-```text
-http://localhost:5001
-```
-
-### `GET /`
-
-Returns service metadata and endpoint list.
-
-### `GET /health`
-
-Returns backend health and MySQL status.
-
-Example response:
-
-```json
-{
-  "status": "healthy",
-  "mysql": "enabled",
-  "timestamp": "2026-05-23T12:00:00"
-}
-```
-
-### `POST /api/validate`
-
-Validates an IP, domain, or hash.
-
-Request:
-
-```json
-{
-  "target": "example.com",
-  "type": "domain"
-}
-```
-
-`type` can be:
-
-- `auto`
-- `ip`
-- `domain`
-- `hash`
-
-### `POST /api/scan`
-
-Runs a secondary manual enrichment scan against supported external providers. This endpoint is for investigation and does not perform the real-time alert detection.
-
-Request:
-
-```json
-{
-  "target": "8.8.8.8",
-  "type": "ip"
-}
-```
-
-For IP scans, the target must be a public, globally routable IPv4 address.
-
-### `POST /api/scan/<service>`
-
-Runs one provider-specific manual enrichment scan.
-
-Supported service names:
-
-- `abuseipdb`
-- `virustotal`
-- `alienvault`
-- `greynoise`
-
-Example:
-
-```text
-POST /api/scan/virustotal
-```
-
-### `GET /api/alerts`
-
-Fetches stored real-time alerts generated by the detector.
-
-Optional query:
-
-```text
-/api/alerts?limit=100
-```
-
-### `DELETE /api/alerts`
-
-Clears stored alerts.
-
-### `GET /api/alert-stats`
-
-Returns chart-ready statistics for detector-generated alerts.
-
-### `POST /api/receive-alert`
-
-Receives real-time alerts from `attack_detector.py`. This is the central endpoint in the project.
-
-Request:
-
-```json
-{
-  "type": "ssh_bruteforce",
-  "name": "SSH Brute Force Attack",
-  "severity": "high",
-  "attacker_ip": "8.8.8.8",
-  "target_ip": "192.168.1.10",
-  "timestamp": "2026-05-23T12:00:00",
-  "log_line": "Failed password for admin from 8.8.8.8 port 22 ssh2",
-  "attempt_count": 5
-}
-```
-
-If `ALERT_INGEST_TOKEN` is configured, include one of:
-
-```text
-X-Alert-Token: your_token
-```
-
-or:
-
-```text
-Authorization: Bearer your_token
-```
-
-### `GET /api/threat-logs`
-
-Fetches stored manual scan logs.
-
-Optional query:
-
-```text
-/api/threat-logs?limit=500
-```
-
-### `POST /api/block-ip`
-
-Blocks a public IPv4 address in the application blocklist and optionally in the system firewall.
-
-Request:
-
-```json
-{
-  "ip": "8.8.8.8",
-  "reason": "manual_block",
-  "firewall": false
-}
-```
-
-### `POST /api/unblock-ip`
-
-Unblocks an IP from the runtime blocklist and removes firewall rules if the backend created them.
-
-Request:
-
-```json
-{
-  "ip": "8.8.8.8"
-}
-```
-
-### `GET /api/blocked-ips`
-
-Lists currently blocked IPs.
-
-### `GET /api/cache-stats`
-
-Returns cache and rate-limit information.
-
-### `GET /api/status`
-
-Returns backend status, MySQL status, manual-scan provider status labels, and blocklist count.
-
-## Database Schema
-
-The database contains two main tables.
-
-### `alerts`
-
-Stores real-time attack alerts.
-
-Important columns:
-
-- `id`
-- `alert_type`
-- `source`
-- `ip_address`
-- `severity`
-- `description`
-- `target_ip`
-- `log_line`
-- `attempt_count`
-- `raw_payload`
-- `created_at`
-- `updated_at`
-
-Alert deduplication groups recent alerts by:
-
-- `source`
-- `ip_address`
-- `alert_type`
-
-### `threat_logs`
-
-Stores manual IP scan history.
-
-Important columns:
-
-- `id`
-- `ip_address`
-- `country`
-- `country_code`
-- `threat_score`
-- `api_sources`
-- `status`
-- `scan_results`
-- `overall_data`
-- `last_scanned_at`
-- `created_at`
-- `updated_at`
-
-`ip_address` is unique, so repeated scans update the existing row.
-
-## IP Blocking
-
-The project supports two blocking modes.
-
-### App-Level Blocking
-
-Stores the IP in the backend runtime `blocked_ips` dictionary.
-
-Limitations:
-
-- Not persistent after backend restart.
-- Does not affect operating-system network traffic.
-
-### Firewall-Level Blocking
-
-Attempts to add operating-system firewall rules.
-
-Supported platforms:
-
-| OS | Method |
-|----|--------|
-| Windows | `netsh advfirewall` |
-| Linux | `sudo iptables` |
-| macOS | `sudo route` |
-
-Firewall blocking may require administrator or sudo privileges.
-
-For safety, block actions accept only public, globally routable IPv4 addresses.
-
-## Testing Real-Time Alerts
-
-For local Windows-style testing, start the backend and detector, then append this line to `attack_detector.log`:
-
-```text
-Failed password for root from 8.8.8.8 port 22 ssh2
-```
-
-Expected result:
-
-1. `attack_detector.py` detects the SSH root brute force pattern.
-2. It sends an alert to `/api/receive-alert`.
-3. The backend validates and stores the alert when MySQL is enabled.
-4. The dashboard displays the alert in the Alerts tab.
-
-Linux systems can test with authorized SSH failed-login events or controlled lab traffic that writes to `/var/log/syslog` or the configured `ATTACK_LOG_FILE`.
-
-## Firewall Blocking Setup
-
-Linux helper:
-
-```bash
-sudo bash setup-firewall-blocking.sh
-```
-
-Test firewall capability:
-
-```bash
-python test-firewall-blocking.py
-```
-
-Only run firewall tests on systems where you understand and accept the network changes being made.
-
 ## Security Notes
 
-- Use this project only in authorized environments.
-- Do not scan or attack systems without permission.
-- Keep `.env` private and never commit real provider keys or tokens.
-- Configure `CORS_ORIGINS` narrowly for your frontend host.
-- Set `ALERT_INGEST_TOKEN` if the backend is reachable outside your local machine.
-- Firewall blocking can affect real connectivity; use carefully.
-- The current app-level blocklist is runtime memory only.
-- Authentication and role-based access control are not yet implemented.
-- The Flask development server is not a production WSGI deployment.
+- Use this project only for defensive learning and authorized testing.
+- Do not scan, attack, or test systems without permission.
+- Keep `.env` private.
+- Do not commit real API keys.
+- Use `ALERT_INGEST_TOKEN` if the backend is exposed outside your machine.
+- Use `EDR_AGENT_TOKEN` to protect endpoint agent ingestion.
+- Firewall blocking can affect real network traffic, so use it carefully.
+- The Flask development server is not a production deployment.
 
-## Troubleshooting
+## Limitations
 
-### Backend Does Not Start
-
-Check dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Check `.env` values, especially MySQL settings if `MYSQL_ENABLED=true`.
-
-### Dashboard Cannot Reach Backend
-
-Confirm the backend is running:
-
-```text
-http://localhost:5001/health
-```
-
-If serving the frontend from a different origin, add that origin to `CORS_ORIGINS`.
-
-### Alerts Do Not Appear
-
-Check:
-
-- `backend.py` is running.
-- `attack_detector.py` is running.
-- `ATTACK_BACKEND_URL` points to the correct backend.
-- `ATTACK_LOG_FILE` points to the log being updated.
-- The log line contains a supported pattern.
-- The attacker IP is public and valid.
-- If `ALERT_INGEST_TOKEN` is set, the detector has the same token.
-
-### Manual Scan Enrichment Returns No Useful Results
-
-Check:
-
-- External provider keys are configured.
-- The target type is correct.
-- IP targets are public IPv4 addresses.
-- Network access is available.
-- Provider quota has not been exceeded.
-
-### MySQL Errors
-
-Check:
-
-- MySQL Server is running.
-- Credentials are correct.
-- The configured user can create and use the database.
-- `mysql-connector-python` is installed.
-
-### Firewall Blocking Fails
-
-Check:
-
-- You are running with administrator or sudo privileges.
-- The target IP is public IPv4.
-- Required firewall tools are installed.
-- On Linux, `iptables` is available.
-- On Windows, PowerShell or terminal is running as Administrator.
-
-## Verification Commands
-
-Python syntax check:
-
-```bash
-python -m py_compile backend.py attack_detector.py test-firewall-blocking.py
-```
-
-JavaScript syntax check:
-
-```bash
-node --check script.js
-```
-
-Backend smoke checks:
-
-```bash
-python -c "import backend; c=backend.app.test_client(); print(c.get('/health').status_code); print(c.get('/api/status').status_code)"
-```
-
-Manual scan validation smoke check:
-
-```bash
-python -c "import backend; c=backend.app.test_client(); print(c.post('/api/scan', json={'target':'8.8.8.8','type':'ip'}).status_code)"
-```
-
-## Current Limitations
-
-- No user login or role-based access control.
-- Runtime app-level blocklist is not persistent.
-- Live updates use polling rather than WebSockets.
-- Some monitoring-table data is still demo/fallback data when backend data is unavailable.
-- Firewall blocking behavior depends on OS permissions and installed tools.
-- Manual enrichment quality depends on provider keys, provider availability, and quota.
-- Flask development server should be replaced with a production WSGI server for deployment.
+- No user login or role-based access control is included.
+- Application-level IP blocklist is stored in memory.
+- Live updates use polling, not WebSockets.
+- Manual scan quality depends on API keys, network access, and provider limits.
+- Windows endpoint telemetry works best with Administrator permission.
+- Some frontend data may use fallback values if the backend has no stored data yet.
+- Production deployment needs extra hardening.
 
 ## Future Improvements
 
-- Add authentication and role-based permissions.
-- Persist blocklist entries in MySQL.
-- Add block/unblock audit history.
-- Add WebSocket-based real-time updates.
-- Add background scan queue with retry and status tracking.
-- Add provider health and quota dashboard.
-- Add scheduled scans.
-- Add SIEM integrations.
-- Add Docker Compose for backend and MySQL.
-- Add automated unit and integration tests.
-- Add rule-based automated response playbooks.
-- Add richer domain and hash enrichment.
-- Add production deployment documentation.
+- Add user login and roles
+- Add WebSocket-based live updates
+- Store blocklist entries permanently
+- Add more detection rules
+- Add SIEM integrations
+- Add Docker Compose setup
+- Add automated tests
+- Add better reporting
+- Add case management workflow
+- Add automated response playbooks
 
 ## Ethical Use
 
-This project is intended for defensive cybersecurity education, authorized lab testing, monitoring, and response. Use the detector, simulator, scanning, and blocking features only on systems and networks where you have explicit permission.
+This project is made for defensive cybersecurity education, lab testing, monitoring, and response. Use it only where you have clear permission.
