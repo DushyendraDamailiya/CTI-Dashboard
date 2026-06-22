@@ -2,9 +2,28 @@
 
 ## Project Introduction
 
-This project is a local cybersecurity dashboard for detecting, viewing, and responding to suspicious IP activity.
+The Threat Intelligence and Response Dashboard is a cybersecurity project designed to detect, monitor, and respond to suspicious attack activity in real time. The project uses a Flask backend, a browser-based dashboard, a real-time attack detector, and an important Windows endpoint/EDR monitoring module to provide a complete security monitoring workflow.
+In this project, Kali Linux is used as the attacker machine and Windows is used as the target/monitored machine in a controlled lab environment. Different authorized attacks are performed from Kali Linux against the Windows system. These activities create log entries on the Windows machine. The attack detector reads those logs, identifies suspicious patterns, and sends real-time alerts to the backend. The dashboard then displays these alerts with useful details such as attacker IP, target IP, attack type, severity, timestamp, attempt count, and related log information.
+The project also includes EDR monitoring, which collects endpoint-level activity from the Windows machine, such as process activity, network connections, login events, USB activity, registry changes, scheduled tasks, and other suspicious behavior. This makes the project more powerful because it does not only show network attack alerts, but also provides endpoint visibility for better investigation.
+The main purpose of this project is to show how real-time threat detection, alert generation, endpoint monitoring, visualization, and response actions work together in a security dashboard. Manual scanning using external threat intelligence APIs is also included as an additional feature, allowing users to check IPs, domains, and hashes for more reputation details during investigation.
 
-It watches log files for attack-like behavior, creates real-time alerts, sends those alerts to a Flask backend, and shows everything inside a browser dashboard. The dashboard also includes charts, alert details, threat logs, a global map, IP blocking, and an important Windows endpoint/EDR monitoring module.
+<img width="1919" height="910" alt="1" src="https://github.com/user-attachments/assets/b83935d2-3250-47e6-94c6-5199fc1e1f67" />
+
+<img width="1919" height="1079" alt="2" src="https://github.com/user-attachments/assets/4e12596c-16e9-4a3e-9424-ea600e0daebf" />
+
+<img width="1919" height="1079" alt="3" src="https://github.com/user-attachments/assets/70792986-c257-48cf-9814-449933a9db02" />
+
+<img width="1679" height="1042" alt="8" src="https://github.com/user-attachments/assets/323892ad-87ac-431f-b714-5e1ac9173501" />
+
+<img width="1870" height="1051" alt="7" src="https://github.com/user-attachments/assets/024b2688-f93a-467f-ba48-003e169fbfb0" />
+
+<img width="1874" height="1040" alt="9" src="https://github.com/user-attachments/assets/92b00531-d626-449d-bae8-fe2106f4ffd7" />
+
+<img width="1919" height="1079" alt="4" src="https://github.com/user-attachments/assets/79a12c7c-74c4-4590-9c6a-e14935ed86ea" />
+
+<img width="1919" height="1079" alt="5" src="https://github.com/user-attachments/assets/66c1b1bb-3a9f-419d-a742-8ce2a1902d32" />
+
+<img width="1919" height="1079" alt="6" src="https://github.com/user-attachments/assets/fc60e212-98ef-4e71-8838-06db25b8c8ca" />
 
 The main goal of this project is simple:
 
