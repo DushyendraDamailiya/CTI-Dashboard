@@ -18,7 +18,7 @@ Use it only in systems and networks where you have permission.
 
 In our lab demonstration, Kali Linux is used as the attacker machine and Windows is used as the target/monitored machine. We perform controlled and authorized test attacks from Kali Linux to Windows. The Windows system records the activity in logs, `attack_detector.py` detects the suspicious patterns, and the dashboard generates real-time attack and threat alerts with further details for investigation.
 
-## Table of Contents
+In our lab demonstration, Kali Linux is used as the attacker machine and Windows is used as the target/monitored machine. We perform controlled and authorized test attacks from Kali Linux to Windows. The Windows system records the activity in logs, `attack_detector.py` detects the suspicious patterns, and the dashboard generates real-time attack and threat alerts with further details for investigation.
 
 - [Main Features](#main-features)
 - [How the Project Works](#how-the-project-works)
