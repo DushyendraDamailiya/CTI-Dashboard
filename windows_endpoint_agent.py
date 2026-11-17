@@ -20,10 +20,16 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 AGENT_VERSION = "0.1.0"
@@ -42,7 +48,7 @@ def powershell_single_quote(value):
 
 
 def utc_now():
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def stable_id(prefix, *values):
@@ -194,6 +200,13 @@ class WindowsCollector:
         if normalized_path in self.signature_cache:
             return self.signature_cache[normalized_path]
 
+        lower_path = normalized_path.lower()
+        # Fast path for known Windows system directories to avoid spawning slow PowerShell commands
+        if lower_path.startswith((r"c:\windows\system32", r"c:\windows\syswow64", r"c:\windows\explorer.exe", r"c:\windows\systemapps")):
+            result = {"signature_status": "Valid", "is_signed": True, "signature_issuer": "CN=Microsoft Windows"}
+            self.signature_cache[normalized_path] = result
+            return result
+
         if not Path(normalized_path).exists():
             result = {"signature_status": "MissingFile", "is_signed": False}
             self.signature_cache[normalized_path] = result
@@ -213,7 +226,7 @@ class WindowsCollector:
             "is_signed=($null -ne $sig.SignerCertificate)"
             "} } | ConvertTo-Json -Depth 3"
         )
-        parsed = parse_json_output(run_powershell(script, timeout=10))
+        parsed = parse_json_output(run_powershell(script, timeout=8))
         result = parsed[0] if parsed else {"signature_status": "Unknown", "is_signed": False}
         self.signature_cache[normalized_path] = result
         return result
@@ -247,11 +260,33 @@ class WindowsCollector:
 
     def collect_processes(self):
         script = (
-            "Get-CimInstance Win32_Process | "
+            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
             "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | "
             "ConvertTo-Json -Depth 3"
         )
-        rows = parse_json_output(run_powershell(script, timeout=20))
+        rows = parse_json_output(run_powershell(script, timeout=12))
+        if not rows:
+            fallback_script = (
+                "Get-Process -ErrorAction SilentlyContinue | "
+                "Select-Object Id,ProcessName,Path | ConvertTo-Json -Depth 2"
+            )
+            fallback_rows = parse_json_output(run_powershell(fallback_script, timeout=8))
+            for row in fallback_rows:
+                pid = row.get("Id")
+                if pid is None or pid == 0:
+                    continue
+                name = row.get("ProcessName") or ""
+                if name and not name.lower().endswith(".exe"):
+                    name = f"{name}.exe"
+                path = row.get("Path") or ""
+                rows.append({
+                    "ProcessId": pid,
+                    "ParentProcessId": 0,
+                    "Name": name,
+                    "ExecutablePath": path,
+                    "CommandLine": path,
+                })
+
         processes = {}
         for row in rows:
             pid = row.get("ProcessId")
@@ -344,16 +379,26 @@ class WindowsCollector:
 
     def collect_process_snapshot(self):
         script = (
-            "Get-CimInstance Win32_Process | "
+            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
             "Select-Object ProcessId,Name | ConvertTo-Json -Depth 2"
         )
-        rows = parse_json_output(run_powershell(script, timeout=10))
+        rows = parse_json_output(run_powershell(script, timeout=8))
+        if not rows:
+            fallback_script = (
+                "Get-Process -ErrorAction SilentlyContinue | "
+                "Select-Object Id,ProcessName | ConvertTo-Json -Depth 2"
+            )
+            fallback_rows = parse_json_output(run_powershell(fallback_script, timeout=8))
+            return [
+                {"pid": row.get("Id"), "process_name": row.get("ProcessName") or ""}
+                for row in fallback_rows
+            ]
         return [
             {"pid": row.get("ProcessId"), "process_name": row.get("Name") or ""}
             for row in rows
         ]
 
-    def collect_files(self):
+    def collect_files(self, is_bootstrap=False):
         events = []
         current_snapshot = {}
         for root in self.watch_dirs:
@@ -363,7 +408,7 @@ class WindowsCollector:
                 continue
             scanned = 0
             for path in files:
-                if scanned >= 2500:
+                if scanned >= 1000:
                     break
                 scanned += 1
                 if not path.is_file() or path.suffix.lower() not in INTERESTING_FILE_EXTENSIONS:
@@ -375,6 +420,8 @@ class WindowsCollector:
                 key = str(path)
                 value = (stat.st_mtime_ns, stat.st_size)
                 current_snapshot[key] = value
+                if is_bootstrap:
+                    continue
                 previous = self.file_snapshot.get(key)
                 if previous is None:
                     signature_info = self.get_signature_info(key) if path.suffix.lower() in {".exe", ".dll"} else {}
@@ -639,7 +686,7 @@ class WindowsCollector:
         self.usb_snapshot = set()
         self.collect_processes()
         self.collect_network()
-        self.collect_files()
+        self.collect_files(is_bootstrap=True)
         self.collect_registry()
         self.collect_scheduled_tasks()
         self.collect_usb_devices()
@@ -670,17 +717,28 @@ def main():
     parser.add_argument("--no-bootstrap", action="store_true")
     args = parser.parse_args()
 
+    print("[EDR] Starting AegisX Windows Endpoint Agent...")
+    print(f"[EDR] Backend target: {args.backend}")
     client = BackendClient(args.backend, args.token)
     collector = WindowsCollector(
         include_login_events=args.include_login_events,
         failed_login_threshold=args.failed_login_threshold,
     )
 
-    if not args.no_bootstrap:
-        collector.bootstrap()
+    # Send first heartbeat immediately so the endpoint registers as Online right away
+    try:
+        status, message = client.heartbeat()
+        print(f"[heartbeat] status={status} {message[:160]}")
+    except Exception as exc:
+        print(f"[heartbeat] notice: initial heartbeat probe: {exc}")
 
-    last_heartbeat = 0
-    last_slow_check = 0
+    if not args.no_bootstrap:
+        print("[EDR] Initializing system baseline snapshot...")
+        collector.bootstrap()
+        print("[EDR] System baseline captured. Active monitoring started.")
+
+    last_heartbeat = time.time()
+    last_slow_check = time.time()
 
     while True:
         now = time.time()

@@ -4,25 +4,30 @@ Real-Time Attack Detector
 Monitors system logs for suspicious activity and sends alerts to the dashboard.
 """
 
+import ipaddress
 import os
 import re
-import time
 import socket
 import threading
-import ipaddress
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 import requests
+from dotenv import load_dotenv
+
+# Load environment configuration if present
+load_dotenv()
 
 BACKEND_URL = os.getenv("ATTACK_BACKEND_URL", "http://localhost:5001")
 ALERT_INGEST_TOKEN = os.getenv("ALERT_INGEST_TOKEN")
 SCAN_INTERVAL = int(os.getenv("ATTACK_SCAN_INTERVAL", "2"))
+ALLOW_PRIVATE_IPS = os.getenv("ATTACK_ALLOW_PRIVATE_IPS", "true").lower() in ("1", "true", "yes")
 IPV4_PATTERN = r"(?:\d{1,3}\.){3}\d{1,3}"
 BEACON_WINDOW = timedelta(minutes=1)
 BEACON_THRESHOLD = 3
 
-# Default to syslog for network attacks (Port Scan, Ping Sweep, etc.)
+# Default to attack_detector.log on Windows or syslog on Linux/macOS
 DEFAULT_LOG_FILE = (
     os.getenv("ATTACK_LOG_FILE")
     or (
@@ -43,17 +48,47 @@ ATTACK_PATTERNS = {
         "name": "SSH Brute Force Attack",
         "severity": "high",
     },
+    "win_failed_login": {
+        # Windows Security Event 4625 failed logons & syslog equivalents
+        "pattern": rf"(?:Event ID 4625|An account failed to log on|Logon Failure).*?(?:Source Network Address:\s*|from\s+)(?P<attacker_ip>{IPV4_PATTERN})",
+        "name": "Windows Failed Logon Burst",
+        "severity": "high",
+    },
+    "rdp_bruteforce": {
+        # RDP connection failure / brute force
+        "pattern": rf"(?:RDP|Terminal Server|TermDD).*?(?:failed|rejected|error|invalid).*?(?:from\s+|ip\s+)?(?P<attacker_ip>{IPV4_PATTERN})",
+        "name": "RDP Brute Force Attempt",
+        "severity": "high",
+    },
     "port_scan": {
         # Detects UFW BLOCK or iptables BLOCK
         "pattern": rf"(UFW BLOCK|iptables.*BLOCK).*SRC=(?P<attacker_ip>{IPV4_PATTERN})",
         "name": "Port Scan Detected",
         "severity": "medium",
     },
+    "nmap_scan": {
+        # Detects Nmap stealth / SYN scan signatures
+        "pattern": rf"(?:Nmap scan|SYN stealth scan|portscan|SCAN).*?(?:from|SRC=)?\s*(?P<attacker_ip>{IPV4_PATTERN})",
+        "name": "Nmap Network Scan Detected",
+        "severity": "medium",
+    },
     "ping_sweep": {
-        # Detects ICMP echo requests in firewall/syslog formats.
+        # Detects ICMP echo requests in firewall/syslog formats
         "pattern": r"(ICMP echo request|PROTO=ICMP)",
         "name": "Ping Sweep Detected",
         "severity": "medium",
+    },
+    "web_sqli": {
+        # SQL injection attempts in web/access logs
+        "pattern": r"(?:UNION(?:\s+ALL)?\s+SELECT|\bOR\s+['\"]?1['\"]?\s*=\s*['\"]?1['\"]?|\bOR\s+1=1\b|SLEEP\(\d+\)|WAITFOR DELAY|BENCHMARK\(\d+)",
+        "name": "SQL Injection Attempt",
+        "severity": "critical",
+    },
+    "web_traversal": {
+        # Directory / path traversal attempts
+        "pattern": r"(?:\.\./\.\./|\.\.\\\.\.\\|/etc/passwd|win\.ini|boot\.ini)",
+        "name": "Directory Traversal Attack",
+        "severity": "high",
     },
     "login_flood": {
         # Generic failed login (web, ftp, etc.)
@@ -92,48 +127,71 @@ class AttackDetector:
         except OSError:
             return "127.0.0.1"
 
-    def is_valid_public_ipv4(self, value):
-        """Validate external IPv4 addresses before alerting."""
+    def is_valid_attacker_ip(self, value):
+        """Validate attacker IPv4 addresses before alerting."""
         try:
-            parsed = ipaddress.ip_address(str(value))
+            parsed = ipaddress.ip_address(str(value).strip())
         except ValueError:
             return False
-        return parsed.version == 4 and parsed.is_global
+        if parsed.version != 4:
+            return False
+        if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast or parsed.is_reserved:
+            return False
+        return ALLOW_PRIVATE_IPS or parsed.is_global
 
-    def extract_attacker_ip(self, line, match):
+    def is_valid_public_ipv4(self, value):
+        """Alias for backwards compatibility."""
+        return self.is_valid_attacker_ip(value)
+
+    def extract_attacker_ip(self, line, match, local_ip=None):
         """Extract the source IPv4 address from common log formats."""
-        groupdict = match.groupdict()
-        if groupdict.get("attacker_ip"):
+        groupdict = match.groupdict() if match else {}
+        if groupdict.get("attacker_ip") and self.is_valid_attacker_ip(groupdict["attacker_ip"]):
             return groupdict["attacker_ip"]
 
-        for group in match.groups():
-            if group and re.fullmatch(IPV4_PATTERN, group):
-                return group
+        if match:
+            for group in match.groups():
+                if (
+                    group
+                    and isinstance(group, str)
+                    and self.is_valid_attacker_ip(group)
+                    and (not local_ip or group != local_ip)
+                ):
+                    return group
 
         source_match = re.search(
-            rf"\b(?:SRC|src|from|client|rip|rhost|remote)=?\s*(?P<ip>{IPV4_PATTERN})\b",
+            rf"\b(?:SRC|src|from|client|rip|rhost|remote|address|ip)=?\s*(?P<ip>{IPV4_PATTERN})\b",
             line,
             re.IGNORECASE,
         )
-        if source_match:
+        if (
+            source_match
+            and self.is_valid_attacker_ip(source_match.group("ip"))
+            and (not local_ip or source_match.group("ip") != local_ip)
+        ):
             return source_match.group("ip")
 
-        ip_match = re.search(rf"\b(?P<ip>{IPV4_PATTERN})\b", line)
-        return ip_match.group("ip") if ip_match else None
+        # Fallback: scan all IPs in the line, picking the first non-local, valid IP
+        all_ips = re.findall(rf"\b{IPV4_PATTERN}\b", line)
+        for ip in all_ips:
+            if (not local_ip or ip != local_ip) and self.is_valid_attacker_ip(ip):
+                return ip
+
+        return None
 
     def parse_log_line(self, line, local_ip):
         """Parse a log line and return attack metadata when matched."""
+        if not line or not line.strip():
+            return None
+
+        clean_line = line.strip()
         for attack_type, config in ATTACK_PATTERNS.items():
-            match = re.search(config["pattern"], line, re.IGNORECASE)
+            match = re.search(config["pattern"], clean_line, re.IGNORECASE)
             if not match:
                 continue
 
-            attacker_ip = self.extract_attacker_ip(line, match)
-            if (
-                not attacker_ip
-                or attacker_ip in {local_ip, "127.0.0.1"}
-                or not self.is_valid_public_ipv4(attacker_ip)
-            ):
+            attacker_ip = self.extract_attacker_ip(clean_line, match, local_ip)
+            if not attacker_ip or attacker_ip in {local_ip, "127.0.0.1"}:
                 continue
 
             return {
@@ -143,7 +201,7 @@ class AttackDetector:
                 "attacker_ip": attacker_ip,
                 "timestamp": datetime.now().isoformat(),
                 "target_ip": local_ip,
-                "log_line": line.strip()[:200],
+                "log_line": clean_line[:200],
             }
         return None
 
@@ -236,7 +294,16 @@ class AttackDetector:
         print(f"[info] Backend: {BACKEND_URL}")
         local_ip = self.get_local_ip()
         print(f"[info] Local IP: {local_ip}")
+        print(f"[info] Lab/Private IP Alerts: {'Enabled' if ALLOW_PRIVATE_IPS else 'Disabled (Public Only)'}")
         print("=" * 50)
+
+        # Ensure local log file exists on Windows so users can append test lines easily
+        if not os.path.exists(self.log_file):
+            try:
+                with open(self.log_file, "a", encoding="utf-8"):
+                    pass
+            except OSError:
+                pass
 
         while True:
             try:
