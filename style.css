@@ -1232,7 +1232,43 @@ select.form-control option:checked {
 }
 
 .leaflet-container {
-    background: linear-gradient(135deg, #0a0e27 0%, #0d1128 100%);
+    background: #0d1117 !important;
+}
+
+/* Cyber dark filter for OpenStreetMap tiles - converts standard OSM into a sleek cybersecurity dark mode */
+.leaflet-tile-pane .dark-tiles,
+.dark-tiles {
+    filter: brightness(0.65) invert(1) contrast(2.8) hue-rotate(200deg) saturate(0.35) !important;
+}
+
+/* Dark mode styling for Leaflet layers control */
+.leaflet-control-layers {
+    background: rgba(20, 24, 41, 0.95) !important;
+    color: #e6edf3 !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+    padding: 8px 12px !important;
+}
+
+.leaflet-control-layers-expanded {
+    background: rgba(13, 17, 40, 0.98) !important;
+}
+
+.leaflet-control-layers-base label {
+    margin: 6px 0 !important;
+    cursor: pointer !important;
+    color: #c9d1d9 !important;
+    font-size: 0.85rem !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    font-family: inherit !important;
+}
+
+.leaflet-control-layers-base input[type="radio"] {
+    cursor: pointer !important;
+    accent-color: #3b82f6 !important;
 }
 
 .leaflet-control-attribution {

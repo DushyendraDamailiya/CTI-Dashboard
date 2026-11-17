@@ -4,25 +4,28 @@ Threat Intelligence Dashboard - Backend Proxy Server
 Handles CORS, rate limiting, caching, and API proxying
 """
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from flask_caching import Cache
-from dotenv import load_dotenv
-import requests
-import os
-import logging
-from datetime import datetime, timedelta
-import re
-from functools import wraps
-import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
-import warnings
-import subprocess
-import platform
-import json
-import ipaddress
-import uuid
+from datetime import datetime, timedelta
+from functools import wraps
 import hashlib
+import ipaddress
+import json
+import logging
+import os
+import platform
+import re
+import subprocess
+import time
+import uuid
+import warnings
+
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_caching import Cache
+from flask_cors import CORS
+import requests
+
 try:
     import mysql.connector
     from mysql.connector import pooling
@@ -46,7 +49,7 @@ def get_cors_origins():
     """Load allowed CORS origins from environment."""
     origins_raw = os.getenv(
         'CORS_ORIGINS',
-        'http://localhost:3000,http://localhost:5173,http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000'
+        'http://localhost:3000,http://localhost:5173,http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000,null'
     )
     return [origin.strip() for origin in origins_raw.split(',') if origin.strip()]
 
@@ -81,7 +84,7 @@ def parse_bool(value, default=False):
     return default
 
 
-CORS(app, resources={r"/api/*": {"origins": get_cors_origins()}})
+CORS(app, resources={r"/*": {"origins": get_cors_origins()}})
 
 # Configure caching (in-memory, 1 hour expiration)
 cache_config = {
@@ -148,10 +151,12 @@ API_CONFIG = {
     }
 }
 
-# Rate limiting
+# Rate limiting and in-memory fallback stores
 REQUEST_LIMIT = 100  # requests per hour per IP
 rate_limit_store = {}
 blocked_ips = {}
+alerts_memory = []
+threat_logs_memory = []
 edr_memory = {
     'endpoints': {},
     'events': [],
@@ -214,9 +219,14 @@ def is_blockable_public_ipv4(ip):
     return parsed.version == 4 and parsed.is_global
 
 
-def mysql_available():
+def mysql_driver_available():
     """Return True when MySQL persistence is configured and the driver exists."""
     return MYSQL_ENABLED and mysql is not None and pooling is not None
+
+
+def mysql_available():
+    """Return True when MySQL persistence is configured, driver exists, and pool is active."""
+    return mysql_driver_available() and mysql_pool is not None
 
 
 def get_mysql_connection():
@@ -234,38 +244,40 @@ def init_mysql():
         logger.info('MySQL persistence disabled')
         return
 
-    if not mysql_available():
-        raise RuntimeError('MYSQL_ENABLED=true but mysql-connector-python is not installed')
+    if not mysql_driver_available():
+        logger.warning('MYSQL_ENABLED=true but mysql-connector-python is not installed. Running in-memory mode.')
+        return
 
-    bootstrap_conn = mysql.connector.connect(
-        host=MYSQL_CONFIG['host'],
-        port=MYSQL_CONFIG['port'],
-        user=MYSQL_CONFIG['user'],
-        password=MYSQL_CONFIG['password'],
-    )
     try:
-        bootstrap_cursor = bootstrap_conn.cursor()
-        bootstrap_cursor.execute(
-            f"CREATE DATABASE IF NOT EXISTS `{MYSQL_CONFIG['database']}` "
-            "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+        bootstrap_conn = mysql.connector.connect(
+            host=MYSQL_CONFIG['host'],
+            port=MYSQL_CONFIG['port'],
+            user=MYSQL_CONFIG['user'],
+            password=MYSQL_CONFIG['password'],
+            connection_timeout=5,
         )
-        bootstrap_cursor.close()
-        bootstrap_conn.commit()
-    finally:
-        bootstrap_conn.close()
+        try:
+            bootstrap_cursor = bootstrap_conn.cursor()
+            bootstrap_cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{MYSQL_CONFIG['database']}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+            bootstrap_cursor.close()
+            bootstrap_conn.commit()
+        finally:
+            bootstrap_conn.close()
 
-    mysql_pool = pooling.MySQLConnectionPool(
-        pool_name='threat_dashboard_pool',
-        pool_size=max(1, MYSQL_POOL_SIZE),
-        host=MYSQL_CONFIG['host'],
-        port=MYSQL_CONFIG['port'],
-        user=MYSQL_CONFIG['user'],
-        password=MYSQL_CONFIG['password'],
-        database=MYSQL_CONFIG['database'],
-    )
+        mysql_pool = pooling.MySQLConnectionPool(
+            pool_name='threat_dashboard_pool',
+            pool_size=max(1, MYSQL_POOL_SIZE),
+            host=MYSQL_CONFIG['host'],
+            port=MYSQL_CONFIG['port'],
+            user=MYSQL_CONFIG['user'],
+            password=MYSQL_CONFIG['password'],
+            database=MYSQL_CONFIG['database'],
+        )
 
-    conn = get_mysql_connection()
-    try:
+        conn = get_mysql_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -537,8 +549,15 @@ def init_mysql():
         conn.commit()
         cursor.close()
         logger.info('MySQL tables ensured successfully')
+    except Exception as exc:
+        logger.warning(f'Could not initialize MySQL connection ({exc}). Falling back to in-memory mode.')
+        mysql_pool = None
     finally:
-        conn.close()
+        if 'conn' in locals() and conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def normalize_country_value(raw_country):
@@ -562,8 +581,8 @@ def compute_log_status(score):
 
 
 def save_threat_log(ip_address, scan_payload):
-    """Persist a manual IP scan to MySQL without allowing duplicate rows for the same IP."""
-    if not mysql_available() or not is_valid_ipv4(ip_address):
+    """Persist a manual IP scan to MySQL or in-memory without allowing duplicate rows for the same IP."""
+    if not is_valid_ipv4(ip_address):
         return
 
     results = scan_payload.get('results', [])
@@ -573,43 +592,79 @@ def save_threat_log(ip_address, scan_payload):
     country, country_code = normalize_country_value(best_country)
     api_sources = ', '.join(result.get('name', 'Unknown API') for result in successful) or 'N/A'
     status = compute_log_status(score)
+    now = datetime.now()
 
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO threat_logs (
-                ip_address, country, country_code, threat_score, api_sources,
-                status, scan_results, overall_data, last_scanned_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                country = VALUES(country),
-                country_code = VALUES(country_code),
-                threat_score = VALUES(threat_score),
-                api_sources = VALUES(api_sources),
-                status = VALUES(status),
-                scan_results = VALUES(scan_results),
-                overall_data = VALUES(overall_data),
-                last_scanned_at = VALUES(last_scanned_at),
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                ip_address,
-                country,
-                country_code,
-                score,
-                api_sources,
-                status,
-                json.dumps(results),
-                json.dumps(scan_payload.get('overall', {})),
-                datetime.now(),
-            )
-        )
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
+    if mysql_available():
+        try:
+            conn = get_mysql_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO threat_logs (
+                        ip_address, country, country_code, threat_score, api_sources,
+                        status, scan_results, overall_data, last_scanned_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        country = VALUES(country),
+                        country_code = VALUES(country_code),
+                        threat_score = VALUES(threat_score),
+                        api_sources = VALUES(api_sources),
+                        status = VALUES(status),
+                        scan_results = VALUES(scan_results),
+                        overall_data = VALUES(overall_data),
+                        last_scanned_at = VALUES(last_scanned_at),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        ip_address,
+                        country,
+                        country_code,
+                        score,
+                        api_sources,
+                        status,
+                        json.dumps(results),
+                        json.dumps(scan_payload.get('overall', {})),
+                        now,
+                    )
+                )
+                conn.commit()
+                cursor.close()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'MySQL error saving threat log: {exc}')
+
+    # In-memory storage fallback
+    if country_code and re.match(r'^[A-Z]{2}$', country_code):
+        flag = ''.join(chr(ord(char) + 127397) for char in country_code)
+    else:
+        flag = '??'
+
+    log_entry = {
+        'id': str(len(threat_logs_memory) + 1),
+        'ip': ip_address,
+        'country': country,
+        'country_code': country_code,
+        'flag': flag,
+        'score': score,
+        'api': api_sources,
+        'status': status,
+        'scanResults': results,
+        'overall': scan_payload.get('overall', {}),
+        'date': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'timestamp': int(now.timestamp() * 1000),
+    }
+
+    for i, existing in enumerate(threat_logs_memory):
+        if existing.get('ip') == ip_address:
+            log_entry['id'] = existing.get('id', log_entry['id'])
+            threat_logs_memory[i] = log_entry
+            return
+
+    threat_logs_memory.insert(0, log_entry)
+    if len(threat_logs_memory) > 500:
+        del threat_logs_memory[500:]
 
 
 def parse_attempt_count(raw_value, default=1):
@@ -664,9 +719,6 @@ def truncate_db_value(value, max_length):
 
 def save_alert(alert_payload):
     """Persist a real-time alert, grouping repeated active alerts by source, IP, and type."""
-    if not mysql_available():
-        return None
-
     attacker_ip = (
         alert_payload.get('attacker_ip')
         or alert_payload.get('ip')
@@ -682,99 +734,162 @@ def save_alert(alert_payload):
         target_ip = None
     now = datetime.now()
 
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, attempt_count, created_at, updated_at, raw_payload
-            FROM alerts
-            WHERE source = %s AND ip_address = %s AND alert_type = %s
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (source, attacker_ip, alert_type)
-        )
-        existing_alert = cursor.fetchone()
+    if mysql_available():
+        try:
+            conn = get_mysql_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, attempt_count, created_at, updated_at, raw_payload
+                    FROM alerts
+                    WHERE source = %s AND ip_address = %s AND alert_type = %s
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (source, attacker_ip, alert_type)
+                )
+                existing_alert = cursor.fetchone()
 
-        if existing_alert:
-            alert_id, current_attempts, first_seen, last_seen, previous_raw_payload = existing_alert
-            is_active_group = (
-                last_seen is not None
-                and now - last_seen <= timedelta(minutes=ALERT_DEDUP_WINDOW_MINUTES)
-            )
-            if is_active_group:
-                previous_payload_attempts = extract_payload_attempt_count(previous_raw_payload)
-                if incoming_attempt_count > previous_payload_attempts:
-                    attempt_delta = incoming_attempt_count - previous_payload_attempts
-                else:
-                    attempt_delta = incoming_attempt_count
+                if existing_alert:
+                    alert_id, current_attempts, first_seen, last_seen, previous_raw_payload = existing_alert
+                    is_active_group = (
+                        last_seen is not None
+                        and now - last_seen <= timedelta(minutes=ALERT_DEDUP_WINDOW_MINUTES)
+                    )
+                    if is_active_group:
+                        previous_payload_attempts = extract_payload_attempt_count(previous_raw_payload)
+                        if incoming_attempt_count > previous_payload_attempts:
+                            attempt_delta = incoming_attempt_count - previous_payload_attempts
+                        else:
+                            attempt_delta = incoming_attempt_count
 
-                next_attempt_count = int(current_attempts or 0) + max(1, attempt_delta)
+                        next_attempt_count = int(current_attempts or 0) + max(1, attempt_delta)
+                        severity = get_alert_severity(
+                            next_attempt_count,
+                            first_seen=first_seen,
+                            last_seen=now,
+                            alert_type=alert_payload.get('type') or alert_type,
+                        )
+                        cursor.execute(
+                            """
+                            UPDATE alerts
+                            SET severity = %s,
+                                description = %s,
+                                target_ip = %s,
+                                log_line = %s,
+                                attempt_count = %s,
+                                raw_payload = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (
+                                severity,
+                                description,
+                                target_ip,
+                                alert_payload.get('log_line'),
+                                next_attempt_count,
+                                json.dumps(alert_payload),
+                                alert_id,
+                            )
+                        )
+                        conn.commit()
+                        cursor.close()
+                        return alert_id
+
+                attempt_count = incoming_attempt_count
                 severity = get_alert_severity(
-                    next_attempt_count,
-                    first_seen=first_seen,
+                    attempt_count,
+                    first_seen=now,
                     last_seen=now,
                     alert_type=alert_payload.get('type') or alert_type,
                 )
                 cursor.execute(
                     """
-                    UPDATE alerts
-                    SET severity = %s,
-                        description = %s,
-                        target_ip = %s,
-                        log_line = %s,
-                        attempt_count = %s,
-                        raw_payload = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    INSERT INTO alerts (
+                        alert_type, source, ip_address, severity, description,
+                        target_ip, log_line, attempt_count, raw_payload
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
+                        alert_type,
+                        source,
+                        attacker_ip,
                         severity,
                         description,
                         target_ip,
                         alert_payload.get('log_line'),
-                        next_attempt_count,
+                        attempt_count,
                         json.dumps(alert_payload),
-                        alert_id,
                     )
                 )
                 conn.commit()
+                alert_id = cursor.lastrowid
                 cursor.close()
                 return alert_id
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'MySQL error saving alert, using in-memory store: {exc}')
 
-        attempt_count = incoming_attempt_count
-        severity = get_alert_severity(
-            attempt_count,
-            first_seen=now,
-            last_seen=now,
-            alert_type=alert_payload.get('type') or alert_type,
-        )
-        cursor.execute(
-            """
-            INSERT INTO alerts (
-                alert_type, source, ip_address, severity, description,
-                target_ip, log_line, attempt_count, raw_payload
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                alert_type,
-                source,
-                attacker_ip,
-                severity,
-                description,
-                target_ip,
-                alert_payload.get('log_line'),
-                attempt_count,
-                json.dumps(alert_payload),
-            )
-        )
-        conn.commit()
-        alert_id = cursor.lastrowid
-        cursor.close()
-        return alert_id
-    finally:
-        conn.close()
+    # In-memory storage fallback
+    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+    for alert in alerts_memory:
+        if (
+            alert.get('source') == source
+            and alert.get('ip') == attacker_ip
+            and alert.get('type') == alert_type
+        ):
+            last_seen_dt = parse_edr_datetime(alert.get('lastSeen') or alert.get('time'))
+            if last_seen_dt and (now - last_seen_dt <= timedelta(minutes=ALERT_DEDUP_WINDOW_MINUTES)):
+                current_attempts = int(alert.get('attemptCount') or 1)
+                previous_payload_attempts = extract_payload_attempt_count(alert.get('raw_payload'))
+                if incoming_attempt_count > previous_payload_attempts:
+                    attempt_delta = incoming_attempt_count - previous_payload_attempts
+                else:
+                    attempt_delta = incoming_attempt_count
+                next_attempt_count = current_attempts + max(0, attempt_delta)
+                alert['attemptCount'] = next_attempt_count
+                alert['lastSeen'] = now_str
+                alert['time'] = now_str
+                alert['description'] = description
+                alert['logLine'] = alert_payload.get('log_line')
+                alert['raw_payload'] = alert_payload
+                first_seen_dt = parse_edr_datetime(alert.get('firstSeen'))
+                alert['severity'] = get_alert_severity(
+                    next_attempt_count,
+                    first_seen=first_seen_dt or now,
+                    last_seen=now,
+                    alert_type=alert_payload.get('type') or alert_type,
+                )
+                return alert['id']
+
+    alert_id = len(alerts_memory) + 1
+    severity = get_alert_severity(
+        incoming_attempt_count,
+        first_seen=now,
+        last_seen=now,
+        alert_type=alert_payload.get('type') or alert_type,
+    )
+    new_alert = {
+        'id': alert_id,
+        'type': alert_type,
+        'source': source,
+        'ip': attacker_ip,
+        'severity': severity,
+        'description': description,
+        'targetIp': target_ip,
+        'logLine': alert_payload.get('log_line'),
+        'attemptCount': incoming_attempt_count,
+        'firstSeen': now_str,
+        'lastSeen': now_str,
+        'time': now_str,
+        'raw_payload': alert_payload,
+    }
+    alerts_memory.insert(0, new_alert)
+    if len(alerts_memory) > 1000:
+        del alerts_memory[1000:]
+    return alert_id
 
 
 def get_alert_severity(
@@ -865,28 +980,31 @@ def serialize_alert_row(row):
 
 
 def fetch_alerts(limit=100):
-    """Load recent alerts from MySQL."""
-    if not mysql_available():
-        return []
+    """Load recent alerts from MySQL or in-memory store."""
+    if mysql_available():
+        try:
+            conn = get_mysql_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, alert_type, source, ip_address, severity, description,
+                           target_ip, log_line, attempt_count, created_at, updated_at
+                    FROM alerts
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),)
+                )
+                rows = cursor.fetchall()
+                cursor.close()
+                return [serialize_alert_row(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'MySQL error fetching alerts, falling back to memory: {exc}')
 
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, alert_type, source, ip_address, severity, description,
-                   target_ip, log_line, attempt_count, created_at, updated_at
-            FROM alerts
-            ORDER BY updated_at DESC
-            LIMIT %s
-            """,
-            (max(1, int(limit)),)
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        return [serialize_alert_row(row) for row in rows]
-    finally:
-        conn.close()
+    return alerts_memory[:max(1, int(limit))]
 
 
 def fetch_alert_stats():
@@ -897,52 +1015,71 @@ def fetch_alert_stats():
     attack_labels = []
     attack_values = []
 
-    if not mysql_available():
-        return {
-            'trend': {'labels': trend_labels, **trend},
-            'attackTypes': {'labels': attack_labels, 'values': attack_values},
-        }
-
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow_start = today_start + timedelta(days=1)
 
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT severity, HOUR(updated_at) AS alert_hour, COUNT(*)
-            FROM alerts
-            WHERE updated_at >= %s AND updated_at < %s
-            GROUP BY severity, alert_hour
-            """,
-            (today_start, tomorrow_start)
-        )
-        for severity, alert_hour, count in cursor.fetchall():
-            severity_key = str(severity or '').lower()
-            if severity_key not in trend:
-                continue
-            bucket_index = min(5, max(0, int(alert_hour or 0) // 4))
-            trend[severity_key][bucket_index] += int(count or 0)
+    if mysql_available():
+        try:
+            conn = get_mysql_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT severity, HOUR(updated_at) AS alert_hour, COUNT(*)
+                    FROM alerts
+                    WHERE updated_at >= %s AND updated_at < %s
+                    GROUP BY severity, alert_hour
+                    """,
+                    (today_start, tomorrow_start)
+                )
+                for severity, alert_hour, count in cursor.fetchall():
+                    severity_key = str(severity or '').lower()
+                    if severity_key not in trend:
+                        continue
+                    bucket_index = min(5, max(0, int(alert_hour or 0) // 4))
+                    trend[severity_key][bucket_index] += int(count or 0)
 
-        cursor.execute(
-            """
-            SELECT alert_type, COALESCE(SUM(attempt_count), 0) AS total_attempts
-            FROM alerts
-            WHERE updated_at >= %s AND updated_at < %s
-            GROUP BY alert_type
-            ORDER BY total_attempts DESC
-            LIMIT 6
-            """,
-            (today_start, tomorrow_start)
-        )
-        for alert_type, total_attempts in cursor.fetchall():
-            attack_labels.append(alert_type or 'Unknown')
-            attack_values.append(int(total_attempts or 0))
+                cursor.execute(
+                    """
+                    SELECT alert_type, COALESCE(SUM(attempt_count), 0) AS total_attempts
+                    FROM alerts
+                    WHERE updated_at >= %s AND updated_at < %s
+                    GROUP BY alert_type
+                    ORDER BY total_attempts DESC
+                    LIMIT 6
+                    """,
+                    (today_start, tomorrow_start)
+                )
+                for alert_type, total_attempts in cursor.fetchall():
+                    attack_labels.append(alert_type or 'Unknown')
+                    attack_values.append(int(total_attempts or 0))
 
-        cursor.close()
-    finally:
-        conn.close()
+                cursor.close()
+                return {
+                    'trend': {'labels': trend_labels, **trend},
+                    'attackTypes': {'labels': attack_labels, 'values': attack_values},
+                }
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'MySQL error fetching alert stats, falling back to memory: {exc}')
+
+    # In-memory stats calculation
+    attack_counts = defaultdict(int)
+    for alert in alerts_memory:
+        alert_time = parse_edr_datetime(alert.get('lastSeen') or alert.get('time'))
+        if alert_time and today_start <= alert_time < tomorrow_start:
+            severity_key = str(alert.get('severity') or 'medium').lower()
+            if severity_key in trend:
+                bucket_index = min(5, max(0, alert_time.hour // 4))
+                trend[severity_key][bucket_index] += 1
+            attack_type = alert.get('type') or 'Unknown'
+            attack_counts[attack_type] += int(alert.get('attemptCount') or 1)
+
+    sorted_attacks = sorted(attack_counts.items(), key=lambda item: item[1], reverse=True)[:6]
+    for name, count in sorted_attacks:
+        attack_labels.append(name)
+        attack_values.append(count)
 
     return {
         'trend': {'labels': trend_labels, **trend},
@@ -951,20 +1088,25 @@ def fetch_alert_stats():
 
 
 def clear_alerts():
-    """Delete all stored real-time alerts from MySQL."""
-    if not mysql_available():
-        return 0
+    """Delete all stored real-time alerts from MySQL and in-memory store."""
+    deleted_rows = 0
+    if mysql_available():
+        try:
+            conn = get_mysql_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM alerts")
+                deleted_rows = cursor.rowcount
+                conn.commit()
+                cursor.close()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'MySQL error clearing alerts: {exc}')
 
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM alerts")
-        deleted_rows = cursor.rowcount
-        conn.commit()
-        cursor.close()
-        return deleted_rows
-    finally:
-        conn.close()
+    mem_count = len(alerts_memory)
+    alerts_memory.clear()
+    return max(deleted_rows, mem_count)
 
 
 def serialize_threat_log_row(row):
@@ -996,28 +1138,31 @@ def serialize_threat_log_row(row):
 
 
 def fetch_threat_logs(limit=500):
-    """Load manual IP scan history from MySQL."""
-    if not mysql_available():
-        return []
+    """Load manual IP scan history from MySQL or in-memory."""
+    if mysql_available():
+        try:
+            conn = get_mysql_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, ip_address, country, country_code, threat_score, api_sources,
+                           scan_results, status, last_scanned_at
+                    FROM threat_logs
+                    ORDER BY last_scanned_at DESC
+                    LIMIT %s
+                    """,
+                    (max(1, int(limit)),)
+                )
+                rows = cursor.fetchall()
+                cursor.close()
+                return [serialize_threat_log_row(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'MySQL error fetching threat logs, falling back to memory: {exc}')
 
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, ip_address, country, country_code, threat_score, api_sources,
-                   scan_results, status, last_scanned_at
-            FROM threat_logs
-            ORDER BY last_scanned_at DESC
-            LIMIT %s
-            """,
-            (max(1, int(limit)),)
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        return [serialize_threat_log_row(row) for row in rows]
-    finally:
-        conn.close()
+    return threat_logs_memory[:max(1, int(limit))]
 
 
 # ============================================
@@ -3753,6 +3898,8 @@ def scan_with_service(service):
         result = query_alienvault(target)
     elif service == 'greynoise':
         result = query_greynoise(target)
+    elif service in {'ipqualityscore', 'ipqs'}:
+        result = query_ipqualityscore(target)
     else:
         return jsonify({'success': False, 'error': f'Unknown service: {service}'}), 400
 
@@ -3876,10 +4023,11 @@ def api_status():
             'database': MYSQL_CONFIG['database'] if mysql_available() else None
         },
         'apis': {
-            'abuseipdb': 'operational',
-            'virustotal': 'operational',
-            'alienvault': 'operational',
-            'greynoise': 'operational'
+            'abuseipdb': 'operational' if API_CONFIG['abuseipdb']['key'] else 'unconfigured',
+            'virustotal': 'operational' if API_CONFIG['virustotal']['key'] else 'unconfigured',
+            'alienvault': 'operational' if API_CONFIG['alienvault']['key'] else 'unconfigured',
+            'greynoise': 'operational' if API_CONFIG['greynoise']['key'] else 'unconfigured',
+            'ipqualityscore': 'operational' if API_CONFIG['ipqualityscore']['key'] else 'unconfigured',
         },
         'blockedIps': len(blocked_ips),
         'timestamp': datetime.now().isoformat()

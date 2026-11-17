@@ -418,7 +418,12 @@ function initializeTabNavigation() {
 
             // Initialize specific tab content if needed
             if (tabName === 'global-map') {
-                setTimeout(initializeMap, 100);
+                setTimeout(() => {
+                    initializeMap();
+                    if (mapInstance) {
+                        mapInstance.invalidateSize();
+                    }
+                }, 100);
             }
         });
     });
@@ -2025,34 +2030,72 @@ function clearAllMapLocations() {
 }
 
 function initializeMap() {
-    if (mapInstance) return;
+    const mapContainer = document.getElementById('worldMap');
+    if (!mapContainer) return;
+
+    if (mapInstance) {
+        mapInstance.invalidateSize();
+        return;
+    }
 
     loadScannedMapLocations();
-
-    const mapContainer = document.getElementById('worldMap');
     mapContainer.innerHTML = ''; // Clear previous map
 
-    // Initialize Leaflet map
-    mapInstance = L.map('worldMap').setView([20, 0], 2);
+    // Initialize Leaflet map with smooth panning and world-wrap support
+    mapInstance = L.map('worldMap', {
+        minZoom: 1.5,
+        maxZoom: 18,
+        worldCopyJump: true
+    }).setView([20, 0], 2);
 
-    // Add map tiles
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '(c) OpenStreetMap contributors',
+    // 1. Cyber Dark Layer: OpenStreetMap with custom dark filter (Free, No API key, No watermarks)
+    const osmDark = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
+        className: 'dark-tiles',
         maxZoom: 19
-    }).addTo(mapInstance);
+    });
 
-    // Render only saved manual scan markers.
+    // 2. Esri Dark Gray Base: High quality clean dark basemap (Free, No API key)
+    const esriDark = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
+        maxZoom: 16
+    });
+
+    // 3. OpenStreetMap Standard: Crisp, detailed bright basemap (Free, No API key)
+    const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
+        maxZoom: 19
+    });
+
+    // Add default Cyber Dark layer
+    osmDark.addTo(mapInstance);
+
+    // Add layer switch control in top-right corner
+    const baseLayers = {
+        "🌙 Cyber Dark": osmDark,
+        "🗺️ Esri Dark Gray": esriDark,
+        "☀️ Standard Light": osmStandard
+    };
+    L.control.layers(baseLayers, null, { position: 'topright' }).addTo(mapInstance);
+
+    // Render only saved manual scan markers
     renderStoredMapLocations();
 
     // Setup map controls
-    document.getElementById('toggleHeatmap').addEventListener('click', () => {
-        showToast('Heatmap view toggled', 'success');
-    });
+    const toggleHeatmapBtn = document.getElementById('toggleHeatmap');
+    if (toggleHeatmapBtn) {
+        toggleHeatmapBtn.addEventListener('click', () => {
+            showToast('Heatmap view toggled', 'success');
+        });
+    }
 
-    document.getElementById('resetMapView').addEventListener('click', () => {
-        mapInstance.setView([20, 0], 2);
-        showToast('Map view reset', 'success');
-    });
+    const resetMapViewBtn = document.getElementById('resetMapView');
+    if (resetMapViewBtn) {
+        resetMapViewBtn.addEventListener('click', () => {
+            mapInstance.setView([20, 0], 2);
+            showToast('Map view reset', 'success');
+        });
+    }
 
     const clearMapLocationsBtn = document.getElementById('clearMapLocations');
     if (clearMapLocationsBtn) {

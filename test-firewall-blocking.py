@@ -41,6 +41,7 @@ def test_macos():
     if not require_sudo():
         return False
 
+    rule_added = False
     try:
         result = run(["sudo", "route", "add", "-net", TEST_IP, "127.0.0.1"])
         if result.returncode != 0:
@@ -48,6 +49,7 @@ def test_macos():
             print(result.stderr or result.stdout)
             return False
 
+        rule_added = True
         print(f"[ok] Added test route for {TEST_IP}")
         verify = run(["netstat", "-rn"])
         if TEST_IP in verify.stdout:
@@ -57,8 +59,9 @@ def test_macos():
         print("[fail] command timed out")
         return False
     finally:
-        subprocess.run(["sudo", "route", "delete", "-net", TEST_IP], capture_output=True, timeout=5)
-        print("[ok] Removed test route")
+        if rule_added:
+            subprocess.run(["sudo", "route", "delete", "-net", TEST_IP], capture_output=True, timeout=5)
+            print("[ok] Removed test route")
 
 
 def test_linux():
@@ -74,6 +77,7 @@ def test_linux():
         print("       Install it first, for example: sudo apt-get install iptables")
         return False
 
+    rule_added = False
     try:
         result = run(["sudo", iptables, "-I", "INPUT", "1", "-s", TEST_IP, "-j", "DROP"])
         if result.returncode != 0:
@@ -81,6 +85,7 @@ def test_linux():
             print(result.stderr or result.stdout)
             return False
 
+        rule_added = True
         print("[ok] Added test iptables rule")
         verify = run(["sudo", iptables, "-L", "-n", "-v"])
         if TEST_IP in verify.stdout:
@@ -90,8 +95,9 @@ def test_linux():
         print("[fail] command timed out")
         return False
     finally:
-        subprocess.run(["sudo", iptables, "-D", "INPUT", "-s", TEST_IP, "-j", "DROP"], capture_output=True, timeout=5)
-        print("[ok] Removed test rule")
+        if rule_added:
+            subprocess.run(["sudo", iptables, "-D", "INPUT", "-s", TEST_IP, "-j", "DROP"], capture_output=True, timeout=5)
+            print("[ok] Removed test rule")
 
 
 def test_windows():
@@ -106,33 +112,37 @@ def test_windows():
             return False
 
         rule_name = f"TEST_BLOCK_{TEST_IP.replace('.', '_')}"
-        result = run([
-            "netsh", "advfirewall", "firewall", "add", "rule",
-            f"name={rule_name}",
-            "dir=in",
-            "action=block",
-            f"remoteip={TEST_IP}",
-            "protocol=any",
-        ])
-        if result.returncode != 0:
-            print("[fail] Windows Firewall rule add failed")
-            print(result.stderr or result.stdout)
-            return False
+        rule_added = False
+        try:
+            result = run([
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name={rule_name}",
+                "dir=in",
+                "action=block",
+                f"remoteip={TEST_IP}",
+                "protocol=any",
+            ])
+            if result.returncode != 0:
+                print("[fail] Windows Firewall rule add failed")
+                print(result.stderr or result.stdout)
+                return False
 
-        print("[ok] Added Windows Firewall test rule")
-        verify = run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"])
-        if rule_name in verify.stdout:
-            print("[ok] Rule verified")
-        return True
+            rule_added = True
+            print("[ok] Added Windows Firewall test rule")
+            verify = run(["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"])
+            if rule_name in verify.stdout:
+                print("[ok] Rule verified")
+            return True
+        finally:
+            if rule_added:
+                subprocess.run([
+                    "netsh", "advfirewall", "firewall", "delete", "rule",
+                    f"name={rule_name}",
+                ], capture_output=True, timeout=5)
+                print("[ok] Removed test rule")
     except subprocess.TimeoutExpired:
         print("[fail] command timed out")
         return False
-    finally:
-        subprocess.run([
-            "netsh", "advfirewall", "firewall", "delete", "rule",
-            f"name=TEST_BLOCK_{TEST_IP.replace('.', '_')}",
-        ], capture_output=True, timeout=5)
-        print("[ok] Removed test rule")
 
 
 def main():

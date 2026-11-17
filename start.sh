@@ -14,10 +14,18 @@ echo "Project: $SCRIPT_DIR"
 
 if [ ! -d "venv" ]; then
     echo "Creating Python virtual environment..."
-    python3 -m venv venv
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -m venv venv
+    else
+        python -m venv venv
+    fi
 fi
 
-source venv/bin/activate
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+elif [ -f "venv/Scripts/activate" ]; then
+    source venv/Scripts/activate
+fi
 
 echo "Installing Python dependencies..."
 pip install -r requirements.txt
